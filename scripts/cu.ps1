@@ -25,7 +25,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('info', 'shot', 'cursor', 'move', 'click', 'drag', 'scroll', 'type', 'paste', 'key', 'windows', 'focus', 'clip', 'wtext', 'uia', 'wake', 'status', 'show', 'place', 'sleep', 'fxon', 'fxoff')]
+    [ValidateSet('info', 'shot', 'cursor', 'move', 'click', 'drag', 'scroll', 'type', 'paste', 'key', 'windows', 'focus', 'clip', 'wtext', 'uia', 'wake', 'status', 'show', 'place', 'sleep', 'fxon', 'fxoff', 'fxstatus')]
     [string]$Action,
 
     [int]$X, [int]$Y,
@@ -43,6 +43,15 @@ param(
     [string]$Path,
     [string]$Title,
     [string]$Name,
+
+    # Input guard for the actions that inject synthetic input (click/key/type/paste/scroll/drag).
+    # It exists for the failure the SKILL documents: SetForegroundWindow can fail silently, so
+    # `focus` reports success while the window is NOT foreground - and then every keystroke lands
+    # in whatever window really is, while each action still reports success. With
+    # -Expect "<title substring>" an input action re-checks the foreground window immediately
+    # before injecting and REFUSES (non-zero, naming the window that would have received the
+    # input) instead of injecting blind. Empty default = no check, old behaviour unchanged.
+    [string]$Expect = '',
     [string]$Mode = 'tree',
     [int]$Depth = 6,
     [long]$Hwnd = 0,
@@ -376,6 +385,24 @@ function Find-Window([string]$needle) {
     $live = @($rows | Where-Object { $_[3] -notlike '-32000*' })
     if ($live.Count -gt 0) { return $live[0] }
     return $rows[0]
+}
+
+function Assert-ForegroundMatch([string]$Needle) {
+    # -Expect enforcement, called by every input action before it injects anything at all.
+    # Same match rule as Find-Window -Title, deliberately nothing more: an ordinal,
+    # case-insensitive substring of the window's TITLE text (ListWindows field 4, i.e.
+    # GetWindowTextW). Find-Window does not compare the process name, so neither does this.
+    # On a mismatch nothing is injected and the action fails loudly instead of typing blind.
+    if (-not $Needle) { return }
+    $fgWin = [CuNat]::GetForegroundWindow()
+    $fgTitle = [CuNat]::WindowText($fgWin)
+    if ($fgTitle.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return }
+    # One plain line for the caller (expected pattern, the window that really is foreground, and
+    # the explicit statement that nothing was injected), then the throw every other refusal in
+    # this file uses - so the exit code is non-zero and the activity chip reports it as an error.
+    $msg = ("EXPECT MISMATCH: expected foreground window matching '{0}' but the foreground window is hwnd {1} '{2}' - no input was injected" -f $Needle, $fgWin.ToInt64(), $fgTitle)
+    Write-Output $msg
+    throw $msg
 }
 
 function Get-Vk([string]$name) {
@@ -917,6 +944,7 @@ switch ($Action) {
     }
 
     'click' {
+        Assert-ForegroundMatch $Expect
         if ($PSBoundParameters.ContainsKey('X')) {
             $sc = Get-ScreenRect
             if ($X -lt $sc.X -or $Y -lt $sc.Y -or $X -ge ($sc.X + $sc.W) -or $Y -ge ($sc.Y + $sc.H)) {
@@ -960,6 +988,7 @@ switch ($Action) {
     }
 
     'drag' {
+        Assert-ForegroundMatch $Expect
         [void][CuNat]::SetCursorPos($X1, $Y1)
         Start-Sleep -Milliseconds 120
         [void][CuNat]::MouseEvent([CuNat]::MOUSEEVENTF_LEFTDOWN, 0)
@@ -976,6 +1005,7 @@ switch ($Action) {
     }
 
     'scroll' {
+        Assert-ForegroundMatch $Expect
         if ($PSBoundParameters.ContainsKey('X')) {
             [void][CuNat]::SetCursorPos($X, $Y)
             Start-Sleep -Milliseconds $DelayMs
@@ -985,12 +1015,14 @@ switch ($Action) {
     }
 
     'type' {
+        Assert-ForegroundMatch $Expect
         if (-not $Text) { throw 'type needs -Text' }
         Send-Text $Text $DelayMs
         Write-Output ("typed {0} char(s)" -f $Text.Length)
     }
 
     'paste' {
+        Assert-ForegroundMatch $Expect
         if (-not $Text) { throw 'paste needs -Text' }
         $old = $null
         try { $old = Get-Clipboard -Raw -ErrorAction SilentlyContinue } catch { }
@@ -1003,6 +1035,7 @@ switch ($Action) {
     }
 
     'key' {
+        Assert-ForegroundMatch $Expect
         if (-not $Keys) { throw 'key needs -Keys, e.g. "ctrl+s"' }
         Send-KeyCombo $Keys
         Write-Output ("sent keys: {0}" -f $Keys)
@@ -1070,6 +1103,14 @@ switch ($Action) {
         if ($DimPct -ge 0) { $fxCmd += (' -Dim {0}' -f ($DimPct / 100.0)) }
         if ($DimAfter -ge 0) { $fxCmd += (' -DimAfterSec {0}' -f $DimAfter) }
         if ($watch -gt 0) { $fxCmd += (' -WatchPid {0}' -f $watch) }
+        # Per-run headline. It has to travel as an argument, quoted by hand: the value routinely
+        # contains spaces, and an unquoted -Text is the exact class of bug that once made a
+        # caller's '-Text "cu-mcp boot"' fail parameter binding outright. Without this, a caller
+        # could pass a headline and see nothing change (the words come from a UTF-8 file by
+        # default, which stays the fallback here).
+        if (-not [string]::IsNullOrWhiteSpace($Text)) {
+            $fxCmd += (' -Text "{0}"' -f ($Text -replace '"', ''))
+        }
         $p = New-Object psobject -Property @{ Id = (Start-Detached $fxCmd 'fx') }
         Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii
         Write-Output ("fx on: takeover overlay pid {0}, stays up until fxoff/watchdog (backstop {1}s), click-through, never steals focus" -f $p.Id, $DurationSec)
@@ -1088,6 +1129,24 @@ switch ($Action) {
             Write-Output 'fx off - overlay gone, screen restored'
         }
         else { Write-Output 'fx off (nothing was running)' }
+    }
+
+    'fxstatus' {
+        # Is the takeover overlay up right now? Added so a caller can decide whether turning it
+        # on would RESTART the intro animation: `fxon` always starts a fresh overlay, which is
+        # visible as the fog re-condensing, so a batch must not call it blindly on every step.
+        # The pid file is only a hint (it can be stale), so the process is checked for real.
+        $pidFile = Join-Path $env:TEMP 'cu-fx.pid'
+        $fxPid = 0
+        if (Test-Path $pidFile) {
+            $old = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue) -join ''
+            if ($old -match '^\d+$') { $fxPid = [int]$old }
+        }
+        $alive = $false
+        if ($fxPid -gt 0) { $alive = [bool](Get-Process -Id $fxPid -ErrorAction SilentlyContinue) }
+        if ($Json) { Write-Output ('{{"on":{0},"pid":{1}}}' -f $(if ($alive) { 'true' } else { 'false' }), $fxPid) }
+        elseif ($alive) { Write-Output ("fx on - overlay pid {0}" -f $fxPid) }
+        else { Write-Output 'fx off (nothing is running)' }
     }
 
     'wtext' {

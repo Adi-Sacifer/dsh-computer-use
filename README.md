@@ -185,6 +185,111 @@ process and take themselves down when it exits (`-WatchTitle`), and both are cli
 neither can ever block a click even while it is up. The kill switch is the third layer, for the
 case where all of that fails.
 
+## One warm process: the MCP server and the batch driver
+
+Every `pwsh -File scripts\cu.ps1 <action>` costs **~2.4 s**, and almost none of it is the action: it
+is process start plus the `Add-Type` compile of the P/Invoke block, paid again on every single call.
+A four-step turn therefore spends ten seconds doing nothing.
+
+`mcp/cu-mcp.ps1` is a small **MCP (stdio) server** that keeps **one warm PowerShell process** instead.
+It loads `cu.ps1` once and from then on re-invokes *that same script* in-process — same file, same
+behaviour — and PowerShell 7 caches the identical `Add-Type` after the first call (786 ms, then
+~3 ms).
+
+| one action | cost |
+|---|---|
+| fresh `pwsh -File cu.ps1 <action>` | ~2400 ms |
+| through the warm server | **~90–150 ms** |
+
+### Registering it as an MCP server
+
+`-CuPath` is the toolkit to wrap — point it at your own `cu.ps1`. Then register the server in the
+host config; seen from the model the tool is named `cu` (in this harness, `mcp__cu__cu`):
+
+```yaml
+- id: mcp-cu
+  name: "@deepseek-ai/dsh-mcp-client"
+  config:
+    serverName: cu
+    transport: stdio
+    command: 'C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
+    args:
+      - '-NoProfile'
+      - '-ExecutionPolicy'
+      - 'Bypass'
+      - '-File'
+      - 'C:\Users\Administrator\.dsh\mcp\cu-mcp.ps1'
+    toolCallTimeoutMs: 120000
+    failOnStartupError: false
+```
+
+The tool takes the same arguments as `cu.ps1` — `action` plus `x`, `y`, `keys`, `mode`, `name`,
+`path`, `json` and so on — and `action: shot` also returns the screenshot as an MCP image block.
+`expect` is mapped too, so a plan can carry the foreground guard with each input action
+(`{"action":"key","keys":"enter","expect":"Slay the Spire 2"}`): if the named window is not in
+front, that step refuses and says so instead of typing into whatever is.
+
+### The batch driver
+
+`mcp/cu-batch.mjs` goes one step further: it boots that server **once** and feeds it a whole **plan**
+from stdin — a JSON array of cu actions — printing one line per step. A turn that needs
+"look, find, click, look" becomes a single process launch:
+
+```powershell
+@'
+[{"action":"shot","path":"C:\\tmp\\s1.png"},
+ {"action":"uia","mode":"find","name":"Save"},
+ {"action":"click","x":3419,"y":1754},
+ {"action":"shot","path":"C:\\tmp\\s2.png"}]
+'@ | node C:\Users\Administrator\.dsh\mcp\cu-batch.mjs
+```
+
+```
+[0] shot 148ms :: C:\tmp\s1.png  3840x2160  1284 KB
+[1] uia 121ms :: a11y : woke 1 hwnd(s), tree 12 -> 107 nodes in 680 ms [1] Button | Save | 3419,1754 126x48 | onScreen=True | click 3482,1778
+[2] click 131ms :: left click x1 at 3419,1754 over 'Untitled - Notepad'
+[3] shot 142ms :: C:\tmp\s2.png  3840x2160  1290 KB
+batch done in 1904 ms (4 actions + server boot)
+```
+
+**The takeover overlay now follows the batch by itself**: the driver turns it **on as its first
+action and off as its last one**, so the effect tracks the automation instead of having to be
+remembered as a separate step. Before switching it on it asks `cu fxstatus -Json` whether the overlay
+is already up — `fxon` always starts a *fresh* overlay, which replays the 6 s intro and reads as a
+flash, so a running one is left alone. (That probe needs a toolkit build that has `fxstatus`.)
+
+| flag | effect |
+|---|---|
+| *(none)* | overlay on for the batch, off after it; left alone if it was already up |
+| `--no-fx` | never touch the overlay |
+| `--keep-fx` | turn it on if needed, and leave it up when the batch ends |
+| `--fx-text "<headline>"` | headline for this batch — see the note below |
+
+> **`--fx-text` reaches the overlay.** The driver passes the headline to `fxon`, which forwards it
+> to `fx.ps1 -Text` — so the words change for that batch without touching
+> `scripts/fx-text.txt` (which stays the default, and is still how you set the headline
+> permanently). Non-ASCII headlines work: the MCP server decodes its input as UTF-8, a bug that
+> used to turn a CJK headline into mojibake and a request that never returned.
+
+### Asking whether the overlay is up
+
+`fxstatus` reports the overlay's state and changes nothing — the answer to "is it already up?":
+
+```powershell
+cu.ps1 fxstatus          # fx on - overlay pid 12345   /   fx off (nothing is running)
+cu.ps1 fxstatus -Json    # {"on":true,"pid":12345}
+```
+
+The pid file alone is only a hint (it can go stale), so the process is checked for real before `on`
+is reported. `-Json` is the form the batch driver parses.
+
+> **Both scripts are tailored to this machine — a worked example, not a package.** They carry
+> absolute paths and assume this box: `cu-mcp.ps1` defaults `-CuPath` to
+> `C:\Users\Administrator\.dsh\skills\computer-use\scripts\cu.ps1` and logs next to itself, and
+> `cu-batch.mjs` spawns `C:\Users\Administrator\.dsh\mcp\cu-mcp.ps1` with the Store-aliased
+> `pwsh.exe` under `%LOCALAPPDATA%\Microsoft\WindowsApps`. `mcp/` in this repo holds byte-identical
+> copies of both files; copy them out and edit those paths before reusing them anywhere else.
+
 ## Diagnostics
 
 `diagnostics/` holds the minimal repro scripts used to establish the findings above — an

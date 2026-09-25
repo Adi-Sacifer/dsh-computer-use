@@ -158,6 +158,105 @@ Done. Overlay/chip processes killed: 1
 （`-WatchTitle` 参数），而且它们都是点击穿透的，就算还挂着也挡不住任何点击。
 这个 kill 开关是第三道，专门兜住"前面都没兜住"的情况。
 
+## 一个常驻进程：MCP 服务器与批处理驱动
+
+每次 `pwsh -File scripts\cu.ps1 <动作>` 都要花 **~2.4 秒**，而其中几乎没花在动作本身：全是进程启动
+加上 P/Invoke 的 `Add-Type` 编译，每调一次就重来一遍。四个动作就是十秒钟的空转。
+
+`mcp/cu-mcp.ps1` 是一个小的 **MCP（stdio）服务器**，做法是**只留一个常驻 PowerShell 进程**：
+把 `cu.ps1` 加载一次，之后都在进程内重新调用**同一个脚本**——同一个文件、同样的行为——
+而 PowerShell 7 会把一模一样的 `Add-Type` 缓存起来（第一次 786 ms，之后 ~3 ms）。
+
+| 一次动作 | 耗时 |
+|---|---|
+| 每次新起 `pwsh -File cu.ps1 <动作>` | ~2400 ms |
+| 走常驻服务器 | **~90–150 ms** |
+
+### 注册成 MCP 服务器
+
+`-CuPath` 指定要包装的工具包，指向你自己的 `cu.ps1` 即可。然后在宿主配置里注册这个服务器——
+模型看到的工具名是 `cu`（在本机 harness 里是 `mcp__cu__cu`）：
+
+```yaml
+- id: mcp-cu
+  name: "@deepseek-ai/dsh-mcp-client"
+  config:
+    serverName: cu
+    transport: stdio
+    command: 'C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
+    args:
+      - '-NoProfile'
+      - '-ExecutionPolicy'
+      - 'Bypass'
+      - '-File'
+      - 'C:\Users\Administrator\.dsh\mcp\cu-mcp.ps1'
+    toolCallTimeoutMs: 120000
+    failOnStartupError: false
+```
+
+参数与 `cu.ps1` 一致——`action` 加上 `x`、`y`、`keys`、`mode`、`name`、`path`、`json` 等——
+并且 `action: shot` 还会把截图作为 MCP image 块一并返回。`expect` 也已接通：计划里每个输入动作
+都能带上"前台窗口必须是它"的护栏（`{"action":"key","keys":"enter","expect":"Slay the Spire 2"}`），
+不匹配时该步直接拒绝并说明，而不是把按键打进别的窗口。
+
+### 批处理驱动
+
+`mcp/cu-batch.mjs` 更进一步：把这个服务器**只启动一次**，从 stdin 喂进一整份**计划**
+（cu 动作组成的 JSON 数组），每个步骤打一行。"看一眼、找控件、点一下、再看一眼"这种回合
+就成了一次进程启动：
+
+```powershell
+@'
+[{"action":"shot","path":"C:\\tmp\\s1.png"},
+ {"action":"uia","mode":"find","name":"保存"},
+ {"action":"click","x":3419,"y":1754},
+ {"action":"shot","path":"C:\\tmp\\s2.png"}]
+'@ | node C:\Users\Administrator\.dsh\mcp\cu-batch.mjs
+```
+
+```
+[0] shot 148ms :: C:\tmp\s1.png  3840x2160  1284 KB
+[1] uia 121ms :: a11y : woke 1 hwnd(s), tree 12 -> 107 nodes in 680 ms [1] Button | 保存 | 3419,1754 126x48 | onScreen=True | click 3482,1778
+[2] click 131ms :: left click x1 at 3419,1754 over '无标题 - 记事本'
+[3] shot 142ms :: C:\tmp\s2.png  3840x2160  1290 KB
+batch done in 1904 ms (4 actions + server boot)
+```
+
+**特效现在会自己跟着批处理走**：驱动把叠层**作为第一个动作打开、作为最后一个动作关掉**，
+特效因此自动对上自动化的起止，不用再指望谁记得单独调一次。打开之前它会先问
+`cu fxstatus -Json` 叠层是不是已经在跑——`fxon` 每次都会起一个**全新的**叠层，会重播 6 秒开场动画、
+看起来像闪一下，所以已经在跑的就原样留着。（这个探测需要工具包是带 `fxstatus` 的版本。）
+
+| 开关 | 作用 |
+|---|---|
+| （不加） | 批处理期间开着、结束后关掉；本来就开着则不动它 |
+| `--no-fx` | 完全不碰叠层 |
+| `--keep-fx` | 需要就打开，批处理结束后**留着不收** |
+| `--fx-text "<标题>"` | 这一批的标题文字——见下方说明 |
+
+> **`--fx-text` 现在能直达叠层。** 驱动把标题交给 `fxon`，`fxon` 再转发给 `fx.ps1 -Text`——
+> 这一批的文案直接生效，不用动 `scripts/fx-text.txt`（它仍是默认值，也是永久改文案的方式）。
+> 中文标题可用：MCP 服务器已按 UTF-8 解码输入（此前中文会变成乱码，请求还会一直不返回）。
+
+### 问一句特效现在开着没有
+
+`fxstatus` 只汇报叠层状态、不改变任何东西——这就是"它是不是已经在跑了"的答案：
+
+```powershell
+cu.ps1 fxstatus          # fx on - overlay pid 12345   /   fx off (nothing is running)
+cu.ps1 fxstatus -Json    # {"on":true,"pid":12345}
+```
+
+pid 文件本身只是线索（可能已经过期），所以报 `on` 之前会真的去查进程。`-Json` 就是批处理驱动
+解析的那个格式。
+
+> **这两个脚本是为本机定制的——是照着抄的例子，不是拿来就能用的包。** 两边都写死了绝对路径、
+> 默认这台机器：`cu-mcp.ps1` 的 `-CuPath` 默认指向
+> `C:\Users\Administrator\.dsh\skills\computer-use\scripts\cu.ps1`，日志也写在它旁边；
+> `cu-batch.mjs` 启动的是 `C:\Users\Administrator\.dsh\mcp\cu-mcp.ps1`，用的是
+> `%LOCALAPPDATA%\Microsoft\WindowsApps` 下那个应用商店别名的 `pwsh.exe`。
+> 本仓库 `mcp/` 里放的就是这两个文件的**逐字节副本**；拿到别处复用之前，先把这些路径改掉。
+
 ## 已知限制
 
 - **Flutter** 应用只暴露一个 `FLUTTERVIEW` 面板；某些 Flutter 控件（尤其是自绘胶囊开关）**完全无视**

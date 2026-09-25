@@ -14,6 +14,11 @@
 param(
     [int]$DurationSec = 86400,
     [string]$TextFile = "",
+    # Direct headline override, so a caller can set the words without inventing a file. The file
+    # stays the default path (it is the only way to keep the headline inside an ASCII-only
+    # script); this exists because `fxon -Text "..."` used to accept a headline and silently
+    # ignore it - measured: the flag arrived, nothing changed on screen.
+    [string]$Text = "",
     [string]$SubTextFile = "",
     [string]$Font = "Source Han Serif SC Heavy",
     [string]$SubFont = "",
@@ -31,9 +36,9 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 # This script is deliberately ASCII-only: Windows PowerShell 5.1 reads BOM-less
 # UTF-8 as the ANSI codepage, which corrupts non-ASCII source and breaks parsing.
 # The headline lives in a UTF-8 text file and is decoded explicitly instead.
-$Text = ""
+# Order matters: an explicit -Text wins over the file, and the file wins over the built-in default.
 if ([string]::IsNullOrWhiteSpace($TextFile)) { $TextFile = Join-Path $PSScriptRoot 'fx-text.txt' }
-if (Test-Path -LiteralPath $TextFile) {
+if ([string]::IsNullOrWhiteSpace($Text) -and (Test-Path -LiteralPath $TextFile)) {
     $Text = [System.IO.File]::ReadAllText($TextFile, [System.Text.Encoding]::UTF8).Trim()
 }
 if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "DaFeiYu is taking over" }

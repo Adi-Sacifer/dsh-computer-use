@@ -68,6 +68,8 @@ Both forms return exit code 0 on success and non-zero on failure. In a multi-ste
 | `sleep -DelayMs n` | Wait |
 | `fxon [-DurationSec n]` | Show the takeover overlay: black fog from every screen edge, a glowing gradient headline, and a blackletter Latin subtitle. Click-through, never steals focus. Full strength for `-DimAfterSec` (6 s), then eases to `-Dim` (10%) and **stays there** for the whole takeover; `-DurationSec` defaults to 86400 and is only a backstop |
 | `fxoff` | Hide the overlay at once |
+| `fxstatus [-Json]` | Ask whether the overlay is up **without touching it**: `fx on - overlay pid N`, or `fx off (nothing is running)`; `-Json` prints `{"on":true,"pid":N}`. Added because `fxon` always starts a *fresh* overlay, so the intro fog visibly re-condenses — check first, and only call `fxon` when this says off |
+| `-Expect "<title substring>"` (input actions) | An **opt-in guard on `click` / `key` / `type` / `paste` / `scroll` / `drag`**: immediately before injecting, re-check that the foreground window's title still matches this substring (same rule as `focus -Title`). On a mismatch the action injects **nothing**, prints one line naming the window that really is foreground, and exits non-zero. This is the cure for the silent version of "my keystrokes vanished": `focus` reporting success while the input goes somewhere else. Empty by default, so old behaviour is unchanged |
 
 ## Coordinates: always prefer UIA over pixels
 
@@ -228,7 +230,19 @@ Clicking through UIA is verified: invoking Explorer's maximize changed the windo
 ## Safety rules
 
 - **Verify the foreground window before typing.** Typing goes wherever focus is, including the
-  user's chat box. Gate it:
+  user's chat box. Gate it with `-Expect`, which is the same check the harness would otherwise have
+  to copy by hand — it makes the toolkit itself refuse instead of typing blind:
+  ```powershell
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $cu key -Keys enter -Expect "Slay the Spire 2"
+  # mismatch -> one line naming the real foreground window, exit code 1, NOTHING injected
+  ```
+  Measured: with the harness window foreground instead of the game, the call printed
+  `EXPECT MISMATCH: expected foreground window matching 'Slay the Spire 2' but the foreground
+  window is hwnd 591846 '... DeepSeek Harness' - no input was injected` and exited 1; with the game
+  foreground the same call returned `sent keys: f24` and exit 0. It is worth passing on every input
+  action whose target matters: it costs nothing and it converts "the game ignored me" into an
+  explicit, visible refusal.
+  The older manual form still works when you need it:
   ```powershell
   & powershell -NoProfile -ExecutionPolicy Bypass -File $cu focus -Title "记事本"
   if ($LASTEXITCODE -ne 0) { throw 'focus failed - aborting' }
@@ -427,12 +441,33 @@ harness and no agent involved.
 > re-runs the 6 s full-strength intro and reads as a flash to the user. Learned the hard way: the
 > overlay was muted by every screenshot, so a run of captures made it blink on and off; a `fxoff`
 > fired as part of a test batch made the user ask why their effect had disappeared; and a finished
-> GUI run left the overlay up because the agent asked instead of closing it.
+> GUI run left the overlay up because the agent asked instead of closing it. If you genuinely
+> cannot tell whether it is up, ask the toolkit instead of guessing: `fxstatus` reports the live
+> state and changes nothing. (Reported a third time as *"the effect is gone again"* on
+> 2026-09-26 — the overlay was working the whole time and simply had nobody to switch it on.)
 
 **Default convention for ordinary work:** switch the overlay on when a run of GUI actions begins
 (`fxon` — ambient defaults `-Dim 0.10` / `-DimAfterSec 6`), so the user always knows the machine is
 being driven without the fog getting in the way; `fxoff` the moment the run ends. Reserve
 `-DimPct 100` for a performance or demo that must stay at full strength throughout.
+
+**The batch driver does this for you, and that is now the recommended path.** On this machine the
+fast route is the warm MCP server (`~/.dsh/mcp/cu-mcp.ps1`, ~90-150 ms per action instead of ~2.4 s
+for a fresh process) driven by `~/.dsh/mcp/cu-batch.mjs`, which takes a JSON array of cu actions on
+stdin and prints one line per step:
+
+```powershell
+# one warm server, several actions, overlay handled automatically
+'[{"action":"focus","title":"Slay the Spire 2"},
+  {"action":"shot","path":"C:\\tmp\\s1.png"},
+  {"action":"click","x":3419,"y":1754}]' | node $env:USERPROFILE\.dsh\mcp\cu-batch.mjs
+```
+
+It switches the takeover overlay **on as its first action and off as its last one**, after asking
+`fxstatus` whether it is already up — so the effect can no longer be "forgotten", and it is never
+restarted mid-run (which would replay the intro). `--no-fx` leaves the overlay completely alone,
+`--keep-fx` leaves it up when the batch ends (the right choice when several batches form one
+takeover), and `--fx-text "<headline>"` overrides the headline.
 
 `fxon` launches `scripts/fx.ps1`: a borderless, topmost, full-screen WPF window that is
 **click-through** (`WS_EX_TRANSPARENT`) and `WS_EX_NOACTIVATE`, so it never blocks the mouse and
