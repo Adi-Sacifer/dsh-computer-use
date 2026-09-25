@@ -8,7 +8,7 @@ installer, no dependencies beyond what ships with Windows.
 scripts/cu.ps1    ~1200 lines, ASCII-only, PowerShell 5.1
 ```
 
-**[中文说明 / Chinese README](README.zh-CN.md)**
+**[中文说明 / Chinese README](README.zh-CN.md)** · **[Changelog](CHANGELOG.md)**
 
 ---
 

@@ -77,21 +77,7 @@ param(
     # -NoChip suppresses the chip for one call.
     [switch]$NoChip,
     [ValidateSet('busy', 'note', 'ok', 'err', 'done')]
-    [string]$State = 'note',
-
-    # The overlay and the activity chip watch a window title, so that closing the host application
-    # takes them down with it instead of stranding fog on a screen with nobody left able to
-    # dismiss it. Point this at whatever application embeds this toolkit, or set it empty to
-    # disable the watchdog entirely.
-    [string]$WatchTitle = 'DeepSeek Harness',
-
-    # Overlay look, forwarded to fx.ps1 by `fxon`. The headline and subtitle TEXT is not set
-    # here on purpose - non-ASCII belongs in scripts/fx-text.txt and scripts/fx-subtext.txt,
-    # because fx.ps1 is ASCII-only and a Chinese literal on a command line can be re-encoded
-    # by the shell before it ever arrives.
-    [string]$Font = '',        # CJK headline family, e.g. 'Source Han Serif SC Heavy'
-    [string]$SubFont = '',     # Latin subtitle family, or 'file:///...ttf#FamilyName'
-    [string]$Accent = ''       # glow colour, e.g. '#3FA9F5'
+    [string]$State = 'note'
 )
 
 # MAINTENANCE HAZARD, learned the hard way - read before adding a variable below.
@@ -108,6 +94,18 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+# WHICH HOST ARE WE? -- this toolkit now runs under Windows PowerShell 5.1 AND PowerShell 7,
+# and the detached GUI helpers (the activity chip, the fx overlay) must be started by the SAME
+# host that is running this file. Hardcoding 'powershell' was correct only while 5.1 was the
+# only host: once pwsh 7 is installed the STORE ALIAS C:\...\WindowsApps\powershell.exe (and
+# 'pwsh') resolves to pwsh, so the child comes up as pwsh.exe while the duplicate-chip guard
+# below still filtered on Name='powershell.exe' -- the guard would never see it and every
+# action would stack another pill on the same spot. Derive the name from $PSHOME instead, so
+# the launcher and the guard can never disagree again.
+$script:HostExe = 'powershell'
+if (Test-Path (Join-Path $PSHOME 'pwsh.exe')) { $script:HostExe = 'pwsh' }
+$script:HostNames = @('powershell.exe', 'pwsh.exe', 'pwsh-preview.exe')
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
@@ -163,7 +161,7 @@ public static class CuNat
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
 
     // --- Accessibility wake-up -------------------------------------------------------
-    // Chromium/Electron (the host app itself, VS Code-style editors, any web page in
+    // Chromium/Electron (DSH itself, the Codex/ChatGPT desktop app, Steam, any web page in
     // Chrome or Edge) keeps its accessibility engine OFF until a real assistive-technology
     // client asks for an accessibility object. Until then UIA reports a near-empty tree, so
     // the only way to aim was to eyeball a downscaled screenshot - which is exactly why
@@ -645,7 +643,7 @@ function Invoke-UiaElement($el) {
 }
 
 function Write-MatchNote($hits, [string]$needle, [bool]$explicitIndex) {
-    # From an external review of this bug: when a locator matches more than one control, acting on    # the first one silently is how a click ends up on the wrong control. Say it out loud.
+    # From Codex's review of this bug: when a locator matches more than one control, acting on    # the first one silently is how a click ends up on the wrong control. Say it out loud.
     if ($hits.Count -le 1) { return }
     if ($explicitIndex) { return }
     $others = @()
@@ -697,8 +695,8 @@ function Test-ChipRunning {
     # process, killed it, and produced a silent no-output failure that looked like a bug in the
     # chip launcher for a good while.
     try {
-        $found = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'cu-status\.ps1"' })
+        $found = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $script:HostNames -contains $_.Name -and $_.ProcessId -ne $PID -and $_.CommandLine -match 'cu-status\.ps1"' })
         if ($found.Count -gt 0) {
             Set-Content -LiteralPath $script:StatusPidPath -Value $found[0].ProcessId -Encoding ascii
             return $true
@@ -719,23 +717,79 @@ function Start-Detached([string]$cmdline, [string]$outTag) {
     # Win32_Process.Create has no -WindowStyle equivalent, so the flag has to be part of the
     # command line - otherwise the helper comes up with a full console window sitting on the
     # user's desktop. Start-Process used to hide it; WMI does not.
+    #
+    # The host name is substituted rather than pattern-matched. The old code did
+    # ($cmdline -replace '^powershell\s+', 'powershell -WindowStyle Hidden ') on a literal
+    # 'powershell ...' command line; under pwsh that regex matches nothing, so the chip would
+    # have appeared with a visible console window. Callers now pass the host name as $HostExe
+    # and this function guarantees the hidden flag.
+    $hostExe = $script:HostExe
+    if ($cmdline -match '^pwsh(-preview)?\s+') { $hostExe = $Matches[0].Trim() }
     if ($cmdline -notmatch '-WindowStyle') {
-        $cmdline = $cmdline -replace '^powershell\s+', 'powershell -WindowStyle Hidden '
+        $cmdline = $hostExe + ' -WindowStyle Hidden ' + ($cmdline -replace '^\S+\s+', '')
     }
+    # MEASURED FIX, 2026-09-26 - the second half of the paragraph above was not true in practice.
+    #
+    # Symptom: a caller that captures cu.ps1 through a pipe (an agent harness, a `| Out-Null`, a CI
+    # step) waited for an EOF that never arrived, so the cu action looked hung forever with no
+    # output. Measured twice: a piped `cu windows` did not return for 25-40 s, and killing the
+    # helper released the caller within a second - proof the helper held the pipe.
+    #
+    # Cause: in this environment the CIM branch below does not succeed, so the Start-Process
+    # fallback runs. That fallback has to pass the two redirect handles, which means the child is
+    # created with bInheritHandles=TRUE - and that hands over EVERY inheritable handle we own,
+    # including the caller's stdout pipe, no matter what the redirects say. (Verified by process
+    # tree: the chip's parent was the cu.ps1 process itself, and its command line was the fallback
+    # one, so WMI was never used.)
+    #
+    # Fix: clear HANDLE_FLAG_INHERIT on our own standard handles for the duration of the spawn, then
+    # put it back. The helper then starts with clean stdio (the redirects) and the caller reaches
+    # EOF as soon as cu.ps1 exits, while the helper itself stays long-lived as intended.
+    if (-not ('CuNoInherit' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CuNoInherit {
+    private const uint HANDLE_FLAG_INHERIT = 0x1;
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int id);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
+    private static readonly int[] Ids = new int[] { -10, -11, -12 };
+    public static void ClearAll() {
+        foreach (int id in Ids) {
+            IntPtr h = GetStdHandle(id);
+            if (h != IntPtr.Zero && h != new IntPtr(-1)) { try { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0); } catch { } }
+        }
+    }
+    public static void RestoreAll() {
+        foreach (int id in Ids) {
+            IntPtr h = GetStdHandle(id);
+            if (h != IntPtr.Zero && h != new IntPtr(-1)) { try { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT); } catch { } }
+        }
+    }
+}
+'@
+    }
+    try { [CuNoInherit]::ClearAll() } catch { }
+
     try {
         $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdline } -ErrorAction Stop
-        if ($r -and $r.ProcessId) { return [int]$r.ProcessId }
+        if ($r -and $r.ProcessId) { try { [CuNoInherit]::RestoreAll() } catch { }; return [int]$r.ProcessId }
     }
     catch { }
     # Fallback: still redirect the streams so the child cannot hold a pipe it was not meant to.
+    $newPid = 0
     try {
-        $p = Start-Process -FilePath 'powershell' -WindowStyle Hidden -PassThru `
-            -ArgumentList ($cmdline -replace '^powershell\s+', '') `
+        $p = Start-Process -FilePath $hostExe -WindowStyle Hidden -PassThru `
+            -ArgumentList ($cmdline -replace '^\S+\s+', '') `
             -RedirectStandardOutput (Join-Path $env:TEMP ("cu-{0}.out" -f $outTag)) `
             -RedirectStandardError (Join-Path $env:TEMP ("cu-{0}.err" -f $outTag))
-        return [int]$p.Id
+        $newPid = [int]$p.Id
     }
-    catch { return 0 }
+    catch { $newPid = 0 }
+    try { [CuNoInherit]::RestoreAll() } catch { }
+    return $newPid
 }
 
 function Start-CuStatusChip {
@@ -747,9 +801,9 @@ function Start-CuStatusChip {
     $watch = 0
     foreach ($l in [CuNat]::ListWindows($false)) {
         $f = $l -split '\|'
-        if ($WatchTitle -and $f[4] -match [regex]::Escape($WatchTitle)) { $watch = [int]$f[1]; break }
+        if ($f[4] -match 'DeepSeek Harness') { $watch = [int]$f[1]; break }
     }
-    $cmdline = 'powershell -NoProfile -STA -ExecutionPolicy Bypass -File "{0}" -StatusFile "{1}"' -f $chip, $script:StatusPath
+    $cmdline = '{0} -NoProfile -STA -ExecutionPolicy Bypass -File "{1}" -StatusFile "{2}"' -f $script:HostExe, $chip, $script:StatusPath
     if ($watch -gt 0) { $cmdline += (' -WatchPid {0}' -f $watch) }
     $newPid = Start-Detached $cmdline 'status'
     if ($newPid -gt 0) { Set-Content -LiteralPath $script:StatusPidPath -Value $newPid -Encoding ascii }
@@ -1007,17 +1061,14 @@ switch ($Action) {
             $watch = 0
             foreach ($l in [CuNat]::ListWindows($false)) {
                 $f = $l -split '\|'
-                if ($WatchTitle -and $f[4] -match [regex]::Escape($WatchTitle)) { $watch = [int]$f[1]; break }
+                if ($f[4] -match 'DeepSeek Harness') { $watch = [int]$f[1]; break }
             }
         }
         # Started detached (see Start-Detached): a long-lived overlay that inherited the caller's
         # stdout would keep that pipe open and make the caller look hung.
-        $fxCmd = 'powershell -NoProfile -STA -ExecutionPolicy Bypass -File "{0}" -DurationSec {1}' -f $fx, $DurationSec
+        $fxCmd = '{0} -NoProfile -STA -ExecutionPolicy Bypass -File "{1}" -DurationSec {2}' -f $script:HostExe, $fx, $DurationSec
         if ($DimPct -ge 0) { $fxCmd += (' -Dim {0}' -f ($DimPct / 100.0)) }
         if ($DimAfter -ge 0) { $fxCmd += (' -DimAfterSec {0}' -f $DimAfter) }
-        if ($Font) { $fxCmd += (' -Font "{0}"' -f $Font) }
-        if ($SubFont) { $fxCmd += (' -SubFont "{0}"' -f $SubFont) }
-        if ($Accent) { $fxCmd += (' -Accent "{0}"' -f $Accent) }
         if ($watch -gt 0) { $fxCmd += (' -WatchPid {0}' -f $watch) }
         $p = New-Object psobject -Property @{ Id = (Start-Detached $fxCmd 'fx') }
         Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii

@@ -1,4 +1,4 @@
-# cu-status.ps1 - tiny "computer use is running" activity chip.
+# cu-status.ps1 - tiny "DaFeiYu is working" activity chip.
 #
 # WHY THIS EXISTS
 # While computer-use is running the harness window is usually behind whatever is being driven,
@@ -33,7 +33,7 @@
 [CmdletBinding()]
 param(
     [string]$StatusFile = "",
-    # bc = bottom centre (default). The corners are often taken on a busy desktop: a pet or
+    # bc = bottom centre (default). The corners are all occupied on this desktop: the Codex pet
     # parks bottom-right as its own topmost window, a maximised window puts its minimise/close
     # buttons top-right, and the fx overlay headline sits top-centre. Bottom-centre is the one
     # strip that is normally just wallpaper, and it is the farthest from anything clickable.
@@ -138,7 +138,7 @@ $label.Foreground = New-Object Windows.Media.SolidColorBrush $colText
 $label.VerticalAlignment = [Windows.VerticalAlignment]::Center
 $label.MaxWidth = 460
 $label.TextTrimming = [Windows.TextTrimming]::CharacterEllipsis
-$label.Text = "Computer Use"
+$label.Text = "DaFeiYu"
 [void]$row.Children.Add($label)
 
 $stepText = New-Object Windows.Controls.TextBlock
@@ -207,7 +207,7 @@ function Set-Position {
 }
 
 function Assert-Topmost {
-    # A desktop pet app is often topmost too, and among topmost windows the last one to
+    # The Codex desktop pet is also a topmost window, and among topmost windows the last one to
     # claim the top wins. Without re-asserting periodically the chip slides underneath it, which
     # looks exactly like "the indicator vanished". SWP_NOACTIVATE keeps the no-focus promise.
     try {

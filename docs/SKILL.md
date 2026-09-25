@@ -6,11 +6,6 @@ whenToUse: The task needs to look at the screen, click or type in an application
 
 # Computer use (Windows desktop control)
 
-> **Public release note.** This document is the working field-notes file the toolkit ships with.
-> Concrete application names, window titles and personal labels have been replaced with generic
-> wording for publication; the measured numbers are kept, because they show the magnitude of each
-> problem rather than identify a machine.
-
 You can see and control this machine's desktop. The toolkit lives next to this file:
 
 - `scripts/cu.ps1` — the whole toolkit (ASCII-only source, by necessity; see Environment).
@@ -21,13 +16,24 @@ landed; always confirm with a fresh screenshot or a state query.
 
 ## Invoking the toolkit
 
-The machine's shell is **Windows PowerShell 5.1** (there is no `pwsh` 7), and the execution policy
-is `Restricted`, so a `.ps1` cannot be run bare. Always launch it like this:
+The machine now has **PowerShell 7.6.6 (Core)** installed alongside **Windows PowerShell 5.1**, and
+the execution policy is `Restricted`, so a `.ps1` cannot be run bare. Both hosts are verified working
+with this toolkit (`info`/`shot`/`windows`/`uia`/`cursor` produce identical results on 5.1 and 7.6.6).
+Always launch it like this:
 
 ```powershell
 $cu = "<skill base dir>\scripts\cu.ps1"
-& powershell -NoProfile -ExecutionPolicy Bypass -File $cu <action> [args...]
+& pwsh      -NoProfile -ExecutionPolicy Bypass -File $cu <action> [args...]   # preferred: PS7
+& powershell -NoProfile -ExecutionPolicy Bypass -File $cu <action> [args...]  # 5.1 still fine
 ```
+
+**Restart the app after installing PowerShell 7, or `pwsh` is invisible.** It arrived as an MSIX
+package (`C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.6.0_x64__8wekyb3d8bbwe\pwsh.exe`,
+reachable through the app-execution alias `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`). A process
+that was already running when it was installed inherited the old `PATH` and cannot see it — measured:
+`where pwsh` failed in the harness shell while the same call from a freshly spawned shell resolved.
+Also note the alias stub `%LOCALAPPDATA%\Microsoft\WindowsApps\powershell.exe` now also launches
+pwsh 7, so the literal token `powershell` is no longer a reliable way to mean "5.1".
 
 Use this form **always** when any argument contains non-ASCII (Chinese text to type, a Chinese
 window title). `cmd.exe` mangles non-ASCII argv, so `cu.cmd` is only safe for pure-ASCII calls:
@@ -60,7 +66,7 @@ Both forms return exit code 0 on success and non-zero on failure. In a multi-ste
 | `wake [-Hwnd n \| -Title "win"] [-WakeMs n]` | Explicitly turn a Chromium/Electron window's accessibility tree on (or diagnose why it stays empty) and report `tree : N -> M nodes` |
 | `status -Text "..." [-State busy\|note\|ok\|err\|done]` | Post a progress line to the activity chip. Use it for the phases that are **not** computer-use — waiting on an API, generating a file, thinking — so "is it still working?" has an answer even when no window is being clicked. `-State done` shows a green finish and auto-hides shortly after |
 | `sleep -DelayMs n` | Wait |
-| `fxon [-DurationSec n] [-Font "family"] [-SubFont "family"] [-Accent "#RGB"] [-DimPct n] [-DimAfter n]` | Show the takeover overlay: black fog from every screen edge, a glowing gradient headline, and a blackletter Latin subtitle. Click-through, never steals focus. Full strength for `-DimAfterSec` (6 s), then eases to `-Dim` (10%) and **stays there** for the whole takeover; `-DurationSec` defaults to 86400 and is only a backstop. The **text** is not a parameter — it lives in `scripts/fx-text.txt` and `scripts/fx-subtext.txt` (UTF-8), because non-ASCII in a command line gets re-encoded and non-ASCII in `fx.ps1` breaks parsing. `-Accent` takes a hex colour; `-DimPct 100` keeps it at full strength |
+| `fxon [-DurationSec n]` | Show the takeover overlay: black fog from every screen edge, a glowing gradient headline, and a blackletter Latin subtitle. Click-through, never steals focus. Full strength for `-DimAfterSec` (6 s), then eases to `-Dim` (10%) and **stays there** for the whole takeover; `-DurationSec` defaults to 86400 and is only a backstop |
 | `fxoff` | Hide the overlay at once |
 
 ## Coordinates: always prefer UIA over pixels
@@ -86,8 +92,8 @@ control type, name, automation id, and rect — use it first on an unfamiliar ap
 ### UIA coverage: Chromium/Electron must be WOKEN first (measured)
 
 **The single biggest cause of "the pointer keeps landing on the wrong button" was this:**
-Chromium and Electron apps (any web page in Chrome/Edge, VS Code, the 某 Electron 聊天应用/该 Electron 应用 desktop
-app, 宿主 itself) keep their **accessibility engine switched off** until something asks for an
+Chromium and Electron apps (any web page in Chrome/Edge, VS Code, the ChatGPT/Codex desktop
+app, DSH itself) keep their **accessibility engine switched off** until something asks for an
 accessibility object. A fresh UIA query on such a window therefore returns almost nothing, the
 agent gives up on UIA and falls back to eyeballing a downscaled screenshot — and eyeballing a
 3840x2160 capture that the image reader shrank to ~1708 px wide is how clicks end up on the
@@ -100,8 +106,8 @@ growing.** Measured on this desktop:
 
 | Window | Before wake | After wake |
 |---|---|---|
-| 宿主 (Electron) | 13 nodes, 4 named, no usable rects | **158 nodes, 140 named, all with real rects** |
-| 该 Electron 应用 / 某 Electron 聊天应用 desktop | 7 nodes, 1 named | **~100 nodes**, incl. `Edit 输入框 2376,1596 1247x77` |
+| DSH (Electron) | 13 nodes, 4 named, no usable rects | **158 nodes, 140 named, all with real rects** |
+| Codex / ChatGPT desktop | 7 nodes, 1 named | **~100 nodes**, incl. `Edit 随心输入 2376,1596 1247x77` |
 
 The wake **persists for the life of the target process** — a second query is instant, and it
 does not need repeating. `uia` prints what happened (`a11y : woke 1 hwnd(s), tree 13 -> 158
@@ -109,7 +115,7 @@ nodes in 400 ms`), and `wake [-Hwnd n | -Title "win"]` does it explicitly and re
 result.
 
 **If a tree still looks empty, suspect the wrong window, not a failed wake.** Measured: the
-该 Electron 应用 app's window `133060` stayed at 13 nodes no matter what was poked, because it is an
+Codex app's window `133060` stayed at 13 nodes no matter what was poked, because it is an
 empty companion window — the real UI lived in window `460604` of the *same* process, which had
 a full tree. Always run `windows -Json` and pick the window that is actually on screen.
 
@@ -125,17 +131,17 @@ So the order of preference is now:
 | App | What UIA exposes |
 |---|---|
 | File Explorer | Full tree: Ribbon, `Shell 文件夹视图`, StatusBar, window buttons `最小化`/`最大化`/`关闭`. `uia -Mode click` works via `InvokePattern` |
-| **Electron / Chromium (宿主, VS Code, 该 Electron 应用/某 Electron 聊天应用 desktop, 某个 CEF 应用, and web pages in Edge)** | **Full tree once woken — buttons, menu bar, `Edit` boxes and table cells with exact rects. This is now the normal case, not an exception.** Measured on a web page in Edge: `woke 2 hwnd(s), tree 47 -> 162 nodes`, then `Button | 开始按钮 | 1690,1290 462x141`, `MenuItem | 账单入口`, and a `DataItem` table cell that copies an API key when clicked. `uia -Mode click` used `InvokePattern` — no coordinates involved at all |
+| **Electron / Chromium (DSH, VS Code, Codex/ChatGPT desktop, Steam, and web pages in Edge)** | **Full tree once woken — buttons, menu bar, `Edit` boxes and table cells with exact rects. This is now the normal case, not an exception.** Measured on a web page in Edge: `woke 2 hwnd(s), tree 47 -> 162 nodes`, then `Button | 开始游戏 | 1690,1290 462x141`, `MenuItem | 余额充值`, and a `DataItem` table cell that copies an API key when clicked. `uia -Mode click` used `InvokePattern` — no coordinates involved at all |
 | Classic Win10 Notepad | Only two unnamed `Pane`s — screenshot it |
-| Flutter (一个 Flutter 应用 and similar) | One `Pane` named `FLUTTERVIEW`. Screenshots only — **and see the switch warning below** |
+| Flutter (快喵加速 and similar) | One `Pane` named `FLUTTERVIEW`. Screenshots only — **and see the switch warning below** |
 
 `uia` targets the foreground window unless `-Hwnd` or `-Title` names one — **prefer `-Hwnd`**:
-titles are duplicated here (two windows are both called `某 Electron 聊天应用`) and matching is by substring.
+titles are duplicated here (two windows are both called `ChatGPT`) and matching is by substring.
 
 ### Acting on the right match, not just any match
 
 `-Name` is a case-insensitive **substring** match, so it usually hits several controls
-(`输入框` matched both the `Edit` box and its placeholder `Text`). Two rules keep that honest:
+(`随心输入` matched both the `Edit` box and its placeholder `Text`). Two rules keep that honest:
 
 - Matches are **ranked**: on-screen and clickable first, then partly off screen, then
   no-usable-rectangle. The old code silently acted on "the first hit", which is often a hidden
@@ -148,13 +154,13 @@ titles are duplicated here (two windows are both called `某 Electron 聊天应�
 ### Every click now proves where it landed
 
 A click that lands on the wrong window used to look exactly like a control that ignores input.
-Reviewing this fix (with 该 Electron 应用, on this desktop) produced the rule worth keeping: **split one
+Reviewing this fix (with Codex, on this desktop) produced the rule worth keeping: **split one
 click into three checks — which window was selected, which screen point was computed, and who
 actually owned that point when the input was injected.** `cu.ps1` now reports all three:
 
 ```
-clicked [1] Edit | 输入框 | 2376,1596 1247x77 | onScreen=True | click 3000,1634
-        via mouse@3000,1634 over '某 Electron 聊天应用' : '输入框'
+clicked [1] Edit | 随心输入 | 2376,1596 1247x77 | onScreen=True | click 3000,1634
+        via mouse@3000,1634 over 'ChatGPT' : '随心输入'
 ```
 
 - `click -X -Y ...` also ends with `over '<window title>'`, and it **refuses** to click outside
@@ -169,7 +175,7 @@ clicked [1] Edit | 输入框 | 2376,1596 1247x77 | onScreen=True | click 3000,16
   that case the coordinates were fine and looking at them harder is a waste of time.
 - When a name matches several controls and no `-Index` was given, the call says so instead of
   picking one quietly:
-  `WARNING: 2 controls match '*输入框*' and no -Index was given - acting on [1]. Also matched: [2] 输入框`
+  `WARNING: 2 controls match '*随心输入*' and no -Index was given - acting on [1]. Also matched: [2] 随心输入`
 - Stale rectangles are avoided by re-querying on every call (`uia` has no cached-element path),
   which matters after scrolling, window moves, list refresh, or animation. Virtualised list items
   may not exist in the tree until they are realised on screen — if a name is missing, scroll it
@@ -178,13 +184,13 @@ clicked [1] Edit | 输入框 | 2376,1596 1247x77 | onScreen=True | click 3000,16
 **Before blaming your own coordinates, check `IsIconic`.** A minimized window keeps reporting a
 stale `rect` in `windows -Json` (e.g. `1569,478,700,1132`) while actually sitting at
 `-32000,-32000`: every click you aim at that rect goes nowhere, and it looks exactly like a pointer
-accuracy bug. Measured the hard way — a whole session of clicks on 该 Flutter 应用 missed because the window
+accuracy bug. Measured the hard way — a whole session of clicks on 快喵 missed because the window
 had been minimized, and `focus -Hwnd` reported success anyway. Always confirm with
 `[user32]::IsIconic($h)` (or `-Property minimized` if you add one) and `ShowWindow($h, 9)` first.
 
 **Synthetic clicks do not drive every control.** Measured on the Flutter app: `Tab`-order buttons
-and text fields respond to `click`/`type` normally, but its pill switches (系统代理开关 / 增强模式开关 /
-自动续费开关) ignore synthetic pointer input entirely — while a `settings` tab 20 px away switches the
+and text fields respond to `click`/`type` normally, but its pill switches (系统代理 / 增强模式 /
+自动续费) ignore synthetic pointer input entirely — while a `settings` tab 20 px away switches the
 page on the first click. So the click pipeline is fine and those widgets are not.
 
 This was chased to the end with an externally-authored probe (`Documents\input-diagnosis\`, from a
@@ -209,7 +215,7 @@ report "the app is broken" — report which control ignored which gesture.
 
 **`SetForegroundWindow` is not reliable here, and a failed raise looks exactly like a broken
 control.** One full matrix run produced seven plausible-looking "no change" results that were all
-worthless: the probe's own log showed `class=Chrome_RenderWidgetHostHWND; root=66594` — the 宿主
+worthless: the probe's own log showed `class=Chrome_RenderWidgetHostHWND; root=66594` — the DSH
 window, not the target — i.e. the point belonged to another window the whole time. Before sending
 input, assert **both**: `GetForegroundWindow() -eq $h` **and** `GetAncestor(WindowFromPoint(pt),2)
 -eq $h`. A luminance probe alone is not enough — a window that does not fill the screen can be
@@ -231,7 +237,7 @@ Clicking through UIA is verified: invoking Explorer's maximize changed the windo
   ```
 - **Re-focus and re-verify before EVERY typing burst, not once per run.** Focus really does wander
   back to the harness window here between tool calls — measured mid-session: a `ctrl+l` plus a
-  99-character URL meant for Edge went nowhere because the 宿主 window had become foreground, even
+  99-character URL meant for Edge went nowhere because the DSH window had become foreground, even
   though Edge had been foreground a minute earlier. Nothing was damaged only because the harness
   chat box happened to be empty. So `focus -Hwnd` → verify → then type, every single time.
   `<kbd>ctrl+1</kbd>`…`<kbd>ctrl+9</kbd>` are also unreliable for switching Edge tabs here.
@@ -242,7 +248,7 @@ Clicking through UIA is verified: invoking Explorer's maximize changed the windo
 - **Transient UI has to be driven inside ONE tool call.** The Start menu, a dropdown, a context
   menu, a hover panel: all of them are dismissed the moment focus moves, and focus here really does
   move between tool calls because the harness window takes it back. Measured: `click` on Start
-  followed by `type "notepad"` in the *next* call produced nothing, twice — the menu was already
+  followed by `type "codex"` in the *next* call produced nothing, twice — the menu was already
   gone, while `info` still cheerfully reported `foreground : 搜索`. So open-search-and-type must be
   one call: `click start` → `sleep` → `type` → `sleep` → `shot`. The same applies to a model
   dropdown or any menu you have to open before you can pick from it.
@@ -260,15 +266,34 @@ Clicking through UIA is verified: invoking Explorer's maximize changed the windo
 
 ## Environment facts worth remembering
 
-- Shell: **Windows PowerShell 5.1 (Desktop)**. `pwsh` is absent. `-Version 7` syntax fails, and
-  `$PSVersionTable.PSEdition` is `Desktop`.
+- Shell: **both hosts work.** Windows PowerShell 5.1 (Desktop, `System32\WindowsPowerShell\v1.0`) and
+  **PowerShell 7.6.6 (Core, CLR 10.0.12)**, installed 2026-09-25 as an MSIX package. Verified under
+  PS7: `System.Windows.Forms`, `System.Drawing`, P/Invoke + `SetProcessDPIAware` (reports a real
+  3840x2160), `UIAutomationClient`/`UIAutomationTypes`/`WindowsBase`/`PresentationCore` all load from
+  the Windows Desktop shared framework, and `cu.ps1`'s `info`/`shot`/`windows -Json`/`uia -Mode tree`
+  behave identically to 5.1. `-Version 7` syntax still fails on 5.1, so keep any script you expect to
+  run under both ASCII-and-5.1-compatible.
+- **A hardcoded `powershell` is a bug once PS7 exists.** `cu.ps1` used to build the detached chip and
+  fx command lines with the literal `powershell`, and its duplicate-chip guard filtered
+  `Win32_Process` on `Name='powershell.exe'`. Under PS7 the child comes up as `pwsh.exe`, so the guard
+  could never see it and every action would stack another status pill on the same spot (and the
+  `'^powershell\s+'` regex would silently fail to add `-WindowStyle Hidden`, leaving a console window).
+  Fixed: `cu.ps1` now derives `$script:HostExe` from `$PSHOME` and matches `HostNames = powershell.exe,
+  pwsh.exe, pwsh-preview.exe`. Verified after the fix: three consecutive PS7 actions left exactly one
+  `pwsh.exe` chip alive with a valid pid file. **If you add another detached helper, use `$script:HostExe`,
+  never the literal.**
 - Execution policy is `Restricted`; do **not** change it machine-wide — pass `-ExecutionPolicy Bypass`
   per call instead.
 - `cu.ps1` is deliberately **ASCII-only**: 5.1 reads BOM-less UTF-8 as the ANSI codepage, which
   corrupts non-ASCII source and breaks parsing. Keep it that way; put non-ASCII in arguments, not
-  in the file (or save with a BOM).
-- Per-call cost: `Add-Type` recompiles the P/Invoke block each run (~1s). Batch several actions into
-  one `powershell` launch when latency matters, or accept it.
+  in the file (or save with a BOM). (PS7 would read it as UTF-8, but 5.1 support is being kept.)
+- **Passing a command *into* another PowerShell host is a quoting minefield.** `& pwsh -Command '...'`
+  from 5.1 loses quotes and mangles anything with `->`, `<`, `|` or newlines: measured failures where
+  `pwsh` received an unquoted command name and a `ParserError: 重定向运算符后缺少文件规范`. Use
+  `-File` with a real script, or encode the command:
+  `-EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)))`.
+- Per-call cost: `Add-Type` recompiles the P/Invoke block each run (~1s, comparable under PS7). Batch
+  several actions into one launch when latency matters, or accept it.
 - **DPI awareness is per-process, and every process in the chain needs it.** `cu.ps1` sets it, but a
   helper script you write does not inherit it, and neither does a `powershell -File` child. A
   DPI-unaware process silently gets **virtual** coordinates: measured here, `GetSystemMetrics(0,0)`
@@ -313,7 +338,7 @@ of text in a small pill, always on top, that says what is happening right now.**
 
 It is on automatically. Every `cu.ps1` action writes one line to `%TEMP%\cu-status.txt` and the
 chip picks it up; the chip starts itself on the first action and needs no `fxon`. A run therefore
-looks like `shot · step 4` → `uia find 输入框 · step 5` → `click · step 6`, with a pulsing dot
+looks like `shot · step 4` → `uia find 随心输入 · step 5` → `click · step 6`, with a pulsing dot
 while busy, a green dot when a step lands, red when one fails, and the colour draining out of the
 pill once nothing has happened for a few seconds.
 
@@ -325,7 +350,7 @@ pill once nothing has happened for a few seconds.
 | `WS_EX_NOACTIVATE` + `ShowActivated=false` | never takes focus, so it can never swallow a keystroke |
 | `WS_EX_TOOLWINDOW` | no taskbar button, no alt-tab entry |
 | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` | **visible on screen, invisible to screen capture** |
-| topmost re-asserted every ~1 s | the 该 Electron 应用 pet is topmost too and would otherwise cover it |
+| topmost re-asserted every ~1 s | the Codex pet is topmost too and would otherwise cover it |
 | one status file, no IPC, no waiting | the chip can be dead and `cu.ps1` still works normally |
 
 ### The capture exclusion is the important one, and it costs the translucency
@@ -358,10 +383,20 @@ to black the way `WDA_MONITOR` would — the region simply is not in the capture
   when the text was still the short startup placeholder, so longer messages were cut off
   mid-character. Fixed with an explicit `$win.UpdateLayout()` before re-clipping the region;
   measured afterwards: 4 chars → 133 DIP, 45 chars → 567 DIP, and it shrinks back again.
-- **Launch it with `Win32_Process.Create`, not `Start-Process`.** A long-lived child that inherits
-  the caller's stdout keeps that pipe open after `cu.ps1` exits, so the caller never sees EOF and
-  appears to hang with *no output at all*. `Start-Detached` in `cu.ps1` does this for both the chip
-  and the fx overlay.
+- **Detach the long-lived helpers from the caller's stdio — and do not trust the launcher alone.**
+  A long-lived child that inherits the caller's stdout keeps that pipe open after `cu.ps1` exits, so
+  the caller never sees EOF and appears to hang with *no output at all*. This entry used to say
+  "launch it with `Win32_Process.Create`, not `Start-Process`". That was not enough, and on
+  2026-09-26 the failure was traced properly: the CIM branch does **not** succeed in this
+  environment (the process tree showed the chip parented to the `cu.ps1` process itself, running the
+  fallback command line), and the `Start-Process` fallback must pass its two redirect handles, which
+  means the child is created with `bInheritHandles=TRUE` — and that hands over *every* inheritable
+  handle the caller owns, redirects or not, including the caller's stdout pipe. `Start-Detached` now
+  clears `HANDLE_FLAG_INHERIT` on its own stdin/stdout/stderr for the duration of the spawn and
+  restores it afterwards, for both the chip and the fx overlay, so the helper starts with clean
+  stdio and still outlives the action. Measured, with the chip killed so a fresh one must spawn:
+  before, a piped `cu windows -Json` never returned (released only by killing the chip); after, the
+  same call returns in ~5 s and the full `windows` + `shot` + overlay + `fxoff` sequence takes 11.4 s.
 - **Beware of your own diagnostics.** A cleanup one-liner that greps process command lines for
   `cu-status.ps1` matches the shell running it, kills it, and produces a silent no-output failure
   that looks exactly like a broken launcher. `Test-ChipRunning` now matches `cu-status\.ps1"`
@@ -485,6 +520,6 @@ machine is being driven:
 
 **Fill a field and submit**
 ```powershell
-& powershell -NoProfile -ExecutionPolicy Bypass -File $cu uia -Mode settext -Name "搜索" -Text "agent"
+& powershell -NoProfile -ExecutionPolicy Bypass -File $cu uia -Mode settext -Name "搜索" -Text "大肥鱼"
 & powershell -NoProfile -ExecutionPolicy Bypass -File $cu key -Keys "enter"
 ```

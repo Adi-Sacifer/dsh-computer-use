@@ -8,7 +8,7 @@ PowerShell 5.1 就够。
 scripts/cu.ps1    ~1200 行，纯 ASCII 源码，兼容 PowerShell 5.1
 ```
 
-**[English README](README.md)**
+**[English README](README.md)** · **[更新日志 / Changelog](CHANGELOG.md)**
 
 ---
 

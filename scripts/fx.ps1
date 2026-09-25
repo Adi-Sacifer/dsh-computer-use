@@ -1,4 +1,4 @@
-# fx.ps1 - "computer use in progress" screen overlay.
+# fx.ps1 - "DaFeiYu takes over" screen overlay.
 #
 # Full-screen, borderless, always-on-top, CLICK-THROUGH WPF overlay:
 #   * black fog creeping in from all four screen edges, alive (drifts + breathes)
@@ -36,7 +36,7 @@ if ([string]::IsNullOrWhiteSpace($TextFile)) { $TextFile = Join-Path $PSScriptRo
 if (Test-Path -LiteralPath $TextFile) {
     $Text = [System.IO.File]::ReadAllText($TextFile, [System.Text.Encoding]::UTF8).Trim()
 }
-if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "the machine is being driven" }
+if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "DaFeiYu is taking over" }
 
 # Historical note: cu.ps1's `shot` used to touch a mute file for the duration of a capture so
 # the fog never darkened a screenshot of the screen edges. That made the overlay visibly blink
