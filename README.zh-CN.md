@@ -93,6 +93,56 @@ agent 自己的截图里没有。这很重要：agent 在不停截图，一个�
 `SetWindowDisplayAffinity`（实测 `error 8`），而 WPF 只有分层窗口才有真正的逐像素透明。
 圆角改用窗口区域实现。这个取舍写在了源码里，免得以后有人把它"优化"回一个 bug。
 
+## 把特效文案改成你自己的
+
+特效那两行字存在**普通的 UTF-8 文本文件**里，不在脚本里。改文件、重启特效，就完事：
+
+| 文件 | 是什么 | 默认内容 |
+|---|---|---|
+| `scripts/fx-text.txt` | 上面那行发光的大标题 | `the machine is being driven` |
+| `scripts/fx-subtext.txt` | 底下那行哥特体小字 | `COMPUTER USE` |
+
+```powershell
+# 1. 随便写，文件是按 UTF-8 显式读取的
+Set-Content scripts\fx-text.txt    '机器正在被接管' -Encoding UTF8 -NoNewline
+Set-Content scripts\fx-subtext.txt 'REMOTE CONTROL' -Encoding UTF8 -NoNewline
+
+# 2. 重启特效（fxon 会自动顶掉正在跑的那个）
+cu.ps1 fxoff
+cu.ps1 fxon
+```
+
+中文、日文、emoji 都能正常显示。文件丢了或写成空的也不要紧——会退回内置的英文默认文案，不会变成一片空白。
+
+> **为什么文案放在文件里而不是做成参数。** `fx.ps1` 是**刻意保持纯 ASCII** 的：
+> PowerShell 5.1 会把没有 BOM 的 UTF-8 `.ps1` 当成 ANSI 代码页读，非 ASCII 源码会被破坏、直接解析失败。
+> 而且非 ASCII 走命令行也很脆弱——shell 可能在脚本拿到它之前就重新编码了。
+> 所以脚本保持 ASCII，文字放在 UTF-8 数据文件里。
+> **保存时务必选 UTF-8**；存成 ANSI/GBK 会显示成乱码。
+
+### 其它外观选项
+
+这些通过 `fxon` 传：
+
+```powershell
+cu.ps1 fxon -Font "Source Han Serif SC Heavy"   # 中文标题字体
+cu.ps1 fxon -SubFont "Impact"                   # 拉丁副标题字体
+cu.ps1 fxon -Accent "#FF6B6B"                   # 光晕颜色
+cu.ps1 fxon -DimPct 100                         # 一直保持全强度，不淡出
+cu.ps1 fxon -DimAfter 6                         # 多少秒后开始淡到环境强度
+```
+
+两个选字体的坑，都是实测出来的：
+
+- 真正的哥特黑体（**UnifrakturCook**、**UnifrakturMaguntia**，本包已附带）**不含任何中文字形**。
+  所以哥特味由拉丁副标题承担，主标题用中文衬线体。用之前先确认字体存在：
+  `Kingsoft UE` 会把中文渲染成豆腐块，`Gabriola` / `Impact` / `Bahnschrift` 完全没有中文字形、
+  会静默回退。
+- `-SubFont` 还支持**直接从磁盘加载字体**，不用安装：`file:///C:/path/font.ttf#FamilyName`。
+
+不想每次都传参数的话，直接改 `scripts/fx.ps1` 顶部的默认值（`$Font`、`$Accent` 等），
+或者用 `-TextFile` / `-SubTextFile` 把文案指到别的地方。
+
 ## 已知限制
 
 - **Flutter** 应用只暴露一个 `FLUTTERVIEW` 面板；某些 Flutter 控件（尤其是自绘胶囊开关）**完全无视**

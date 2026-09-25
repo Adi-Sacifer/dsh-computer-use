@@ -83,7 +83,15 @@ param(
     # takes them down with it instead of stranding fog on a screen with nobody left able to
     # dismiss it. Point this at whatever application embeds this toolkit, or set it empty to
     # disable the watchdog entirely.
-    [string]$WatchTitle = 'DeepSeek Harness'
+    [string]$WatchTitle = 'DeepSeek Harness',
+
+    # Overlay look, forwarded to fx.ps1 by `fxon`. The headline and subtitle TEXT is not set
+    # here on purpose - non-ASCII belongs in scripts/fx-text.txt and scripts/fx-subtext.txt,
+    # because fx.ps1 is ASCII-only and a Chinese literal on a command line can be re-encoded
+    # by the shell before it ever arrives.
+    [string]$Font = '',        # CJK headline family, e.g. 'Source Han Serif SC Heavy'
+    [string]$SubFont = '',     # Latin subtitle family, or 'file:///...ttf#FamilyName'
+    [string]$Accent = ''       # glow colour, e.g. '#3FA9F5'
 )
 
 # MAINTENANCE HAZARD, learned the hard way - read before adding a variable below.
@@ -1007,6 +1015,9 @@ switch ($Action) {
         $fxCmd = 'powershell -NoProfile -STA -ExecutionPolicy Bypass -File "{0}" -DurationSec {1}' -f $fx, $DurationSec
         if ($DimPct -ge 0) { $fxCmd += (' -Dim {0}' -f ($DimPct / 100.0)) }
         if ($DimAfter -ge 0) { $fxCmd += (' -DimAfterSec {0}' -f $DimAfter) }
+        if ($Font) { $fxCmd += (' -Font "{0}"' -f $Font) }
+        if ($SubFont) { $fxCmd += (' -SubFont "{0}"' -f $SubFont) }
+        if ($Accent) { $fxCmd += (' -Accent "{0}"' -f $Accent) }
         if ($watch -gt 0) { $fxCmd += (' -WatchPid {0}' -f $watch) }
         $p = New-Object psobject -Property @{ Id = (Start-Detached $fxCmd 'fx') }
         Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii

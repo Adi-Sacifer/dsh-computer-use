@@ -116,6 +116,59 @@ That exclusion is why the chip is **opaque rather than translucent**: Windows re
 per-pixel transparency to a layered window. Rounded shape comes from a window region instead. The
 trade-off is documented in the source so nobody "improves" it back into a bug.
 
+## Making the overlay say your thing
+
+The takeover overlay's two lines of text live in **plain UTF-8 files**, not in the script. Edit
+them, restart the overlay, done:
+
+| File | What it is | Ships as |
+|---|---|---|
+| `scripts/fx-text.txt` | the big glowing headline | `the machine is being driven` |
+| `scripts/fx-subtext.txt` | the small blackletter line under it | `COMPUTER USE` |
+
+```powershell
+# 1. write whatever you want - the file is read as UTF-8 explicitly
+Set-Content scripts\fx-text.txt    'MACHINE UNDER REMOTE CONTROL' -Encoding UTF8 -NoNewline
+Set-Content scripts\fx-subtext.txt 'THE AGENT IS DRIVING' -Encoding UTF8 -NoNewline
+
+# 2. restart the overlay (fxon replaces any running instance)
+cu.ps1 fxoff
+cu.ps1 fxon
+```
+
+Any language works, including CJK and emoji. If a file is missing or empty, the overlay falls
+back to the built-in English default rather than showing nothing.
+
+> **Why text lives in files and not in a parameter.** `fx.ps1` is deliberately ASCII-only:
+> PowerShell 5.1 reads a BOM-less UTF-8 `.ps1` as the ANSI codepage, which corrupts non-ASCII
+> source and breaks parsing. Non-ASCII also survives a command line badly — the shell can
+> re-encode it before the script ever sees it. So the script stays ASCII and the words live in
+> UTF-8 data files. Save those files as **UTF-8**; saving as ANSI/GBK will show up as mojibake.
+
+### The rest of the look
+
+These go through `fxon`:
+
+```powershell
+cu.ps1 fxon -Font "Source Han Serif SC Heavy"   # CJK headline family
+cu.ps1 fxon -SubFont "Impact"                   # Latin subtitle family
+cu.ps1 fxon -Accent "#FF6B6B"                   # glow colour
+cu.ps1 fxon -DimPct 100                         # stay at full strength, never fade
+cu.ps1 fxon -DimAfter 6                         # seconds before easing to ambient
+```
+
+Two face-selection traps worth knowing, both measured:
+
+- A real blackletter face (**UnifrakturCook**, **UnifrakturMaguntia** — both bundled here) carries
+  **no CJK glyphs**. That is why the gothic flavour rides on the Latin subtitle while the headline
+  uses a CJK serif. Check that a face exists before using it: `Kingsoft UE` rendered CJK as tofu
+  boxes, and `Gabriola` / `Impact` / `Bahnschrift` have no CJK at all and fall back silently.
+- `-SubFont` also accepts a font straight off disk, with no installation:
+  `file:///C:/path/font.ttf#FamilyName`.
+
+Rather than passing flags every time, just edit the defaults at the top of `scripts/fx.ps1`
+(`$Font`, `$Accent`, and so on) — or point `-TextFile` / `-SubTextFile` somewhere else entirely.
+
 ## Diagnostics
 
 `diagnostics/` holds the minimal repro scripts used to establish the findings above — an
