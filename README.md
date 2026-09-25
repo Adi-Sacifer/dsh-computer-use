@@ -1,5 +1,10 @@
 # cu-windows — give an LLM agent real eyes and hands on Windows
 
+Current routing: prefer the application's own MCP tools, then the persistent `mcp__cu__cu` tool
+for desktop work. A CU session owns both the six-second edge effect and the progress pill, and
+closes them on `stop`, task completion and cancellation. See [current usage](docs/SKILL.md) and
+[changes](CHANGELOG.md).
+
 A **single-file PowerShell toolkit** that lets an AI agent drive a Windows desktop: screenshot the
 screen, find a control, click it, type into it, and *verify it worked*. No Python, no Node, no
 installer, no dependencies beyond what ships with Windows.

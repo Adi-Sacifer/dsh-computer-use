@@ -25,7 +25,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('info', 'shot', 'cursor', 'move', 'click', 'drag', 'scroll', 'type', 'paste', 'key', 'windows', 'focus', 'clip', 'wtext', 'uia', 'wake', 'status', 'show', 'place', 'sleep', 'fxon', 'fxoff', 'fxstatus')]
+    [ValidateSet('info', 'shot', 'cursor', 'move', 'click', 'drag', 'scroll', 'type', 'paste', 'key', 'windows', 'focus', 'clip', 'wtext', 'uia', 'wake', 'status', 'show', 'place', 'sleep', 'start', 'stop', 'fxon', 'fxoff', 'fxstatus')]
     [string]$Action,
 
     [int]$X, [int]$Y,
@@ -85,6 +85,7 @@ param(
     # computer-use progress without raising the harness window and fighting the pointer.
     # -NoChip suppresses the chip for one call.
     [switch]$NoChip,
+    [int]$SessionOwnerPid = 0,
     [ValidateSet('busy', 'note', 'ok', 'err', 'done')]
     [string]$State = 'note'
 )
@@ -685,8 +686,7 @@ function Write-MatchNote($hits, [string]$needle, [bool]$explicitIndex) {
 # it covers that window while any pointer movement fights the synthetic mouse. So every action
 # posts one line to a status file that a tiny always-on-top, click-through, capture-excluded
 # chip displays. Everything here is best-effort: the chip must never be able to break an action.
-$script:StatusPath = Join-Path $env:TEMP 'cu-status.txt'
-$script:StatusPidPath = Join-Path $env:TEMP 'cu-status.pid'
+. (Join-Path $PSScriptRoot 'cu-session.ps1')
 $script:StatusRunGapSec = 45
 
 function Get-CuStep {
@@ -706,136 +706,6 @@ function Get-CuStep {
     catch { return 1 }
 }
 
-function Test-ChipRunning {
-    # Fast path: the pid file the chip was recorded in.
-    if (Test-Path -LiteralPath $script:StatusPidPath) {
-        $old = (Get-Content -LiteralPath $script:StatusPidPath -ErrorAction SilentlyContinue) -join ''
-        if ($old -match '^\d+$' -and (Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue)) { return $true }
-    }
-    # Slow path, only when the fast one says no: the pid file can be missing or stale (it is only
-    # a hint), and starting a second chip just stacks two identical pills on the same spot.
-    # Ask the OS what is actually running before launching anything.
-    #
-    # Match the CLOSING QUOTE after the script name, not a bare 'cu-status.ps1' substring. A
-    # substring match also hits any shell whose command line merely mentions this file - measured
-    # the hard way: a diagnostic one-liner that grep'd for 'cu-status.ps1' matched its own
-    # process, killed it, and produced a silent no-output failure that looked like a bug in the
-    # chip launcher for a good while.
-    try {
-        $found = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $script:HostNames -contains $_.Name -and $_.ProcessId -ne $PID -and $_.CommandLine -match 'cu-status\.ps1"' })
-        if ($found.Count -gt 0) {
-            Set-Content -LiteralPath $script:StatusPidPath -Value $found[0].ProcessId -Encoding ascii
-            return $true
-        }
-    }
-    catch { }
-    return $false
-}
-
-function Start-Detached([string]$cmdline, [string]$outTag) {
-    # Launch a long-lived GUI helper so that it inherits NOTHING from the caller.
-    #
-    # Start-Process is not good enough here, and the failure is nasty and silent: the child keeps
-    # the caller's stdout handle open for as long as it lives, so whoever ran cu.ps1 (a shell, an
-    # agent, a batch file) never sees its pipe reach EOF and appears to hang with NO output at
-    # all, long after cu.ps1 itself has exited. Win32_Process.Create goes through the service
-    # host and gives the child a clean environment with no inherited handles.
-    # Win32_Process.Create has no -WindowStyle equivalent, so the flag has to be part of the
-    # command line - otherwise the helper comes up with a full console window sitting on the
-    # user's desktop. Start-Process used to hide it; WMI does not.
-    #
-    # The host name is substituted rather than pattern-matched. The old code did
-    # ($cmdline -replace '^powershell\s+', 'powershell -WindowStyle Hidden ') on a literal
-    # 'powershell ...' command line; under pwsh that regex matches nothing, so the chip would
-    # have appeared with a visible console window. Callers now pass the host name as $HostExe
-    # and this function guarantees the hidden flag.
-    $hostExe = $script:HostExe
-    if ($cmdline -match '^pwsh(-preview)?\s+') { $hostExe = $Matches[0].Trim() }
-    if ($cmdline -notmatch '-WindowStyle') {
-        $cmdline = $hostExe + ' -WindowStyle Hidden ' + ($cmdline -replace '^\S+\s+', '')
-    }
-    # MEASURED FIX, 2026-09-26 - the second half of the paragraph above was not true in practice.
-    #
-    # Symptom: a caller that captures cu.ps1 through a pipe (an agent harness, a `| Out-Null`, a CI
-    # step) waited for an EOF that never arrived, so the cu action looked hung forever with no
-    # output. Measured twice: a piped `cu windows` did not return for 25-40 s, and killing the
-    # helper released the caller within a second - proof the helper held the pipe.
-    #
-    # Cause: in this environment the CIM branch below does not succeed, so the Start-Process
-    # fallback runs. That fallback has to pass the two redirect handles, which means the child is
-    # created with bInheritHandles=TRUE - and that hands over EVERY inheritable handle we own,
-    # including the caller's stdout pipe, no matter what the redirects say. (Verified by process
-    # tree: the chip's parent was the cu.ps1 process itself, and its command line was the fallback
-    # one, so WMI was never used.)
-    #
-    # Fix: clear HANDLE_FLAG_INHERIT on our own standard handles for the duration of the spawn, then
-    # put it back. The helper then starts with clean stdio (the redirects) and the caller reaches
-    # EOF as soon as cu.ps1 exits, while the helper itself stays long-lived as intended.
-    if (-not ('CuNoInherit' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class CuNoInherit {
-    private const uint HANDLE_FLAG_INHERIT = 0x1;
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetStdHandle(int id);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
-    private static readonly int[] Ids = new int[] { -10, -11, -12 };
-    public static void ClearAll() {
-        foreach (int id in Ids) {
-            IntPtr h = GetStdHandle(id);
-            if (h != IntPtr.Zero && h != new IntPtr(-1)) { try { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0); } catch { } }
-        }
-    }
-    public static void RestoreAll() {
-        foreach (int id in Ids) {
-            IntPtr h = GetStdHandle(id);
-            if (h != IntPtr.Zero && h != new IntPtr(-1)) { try { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT); } catch { } }
-        }
-    }
-}
-'@
-    }
-    try { [CuNoInherit]::ClearAll() } catch { }
-
-    try {
-        $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdline } -ErrorAction Stop
-        if ($r -and $r.ProcessId) { try { [CuNoInherit]::RestoreAll() } catch { }; return [int]$r.ProcessId }
-    }
-    catch { }
-    # Fallback: still redirect the streams so the child cannot hold a pipe it was not meant to.
-    $newPid = 0
-    try {
-        $p = Start-Process -FilePath $hostExe -WindowStyle Hidden -PassThru `
-            -ArgumentList ($cmdline -replace '^\S+\s+', '') `
-            -RedirectStandardOutput (Join-Path $env:TEMP ("cu-{0}.out" -f $outTag)) `
-            -RedirectStandardError (Join-Path $env:TEMP ("cu-{0}.err" -f $outTag))
-        $newPid = [int]$p.Id
-    }
-    catch { $newPid = 0 }
-    try { [CuNoInherit]::RestoreAll() } catch { }
-    return $newPid
-}
-
-function Start-CuStatusChip {
-    if ($NoChip) { return }
-    $chip = Join-Path $PSScriptRoot 'cu-status.ps1'
-    if (-not (Test-Path -LiteralPath $chip)) { return }
-    if (Test-ChipRunning) { return }
-    # Watchdog target: the harness window's process, so closing the harness takes the chip too.
-    $watch = 0
-    foreach ($l in [CuNat]::ListWindows($false)) {
-        $f = $l -split '\|'
-        if ($f[4] -match 'DeepSeek Harness') { $watch = [int]$f[1]; break }
-    }
-    $cmdline = '{0} -NoProfile -STA -ExecutionPolicy Bypass -File "{1}" -StatusFile "{2}"' -f $script:HostExe, $chip, $script:StatusPath
-    if ($watch -gt 0) { $cmdline += (' -WatchPid {0}' -f $watch) }
-    $newPid = Start-Detached $cmdline 'status'
-    if ($newPid -gt 0) { Set-Content -LiteralPath $script:StatusPidPath -Value $newPid -Encoding ascii }
-}
-
 function Write-CuStatus([string]$state, [string]$message, [int]$step) {
     # Called twice per action (busy, then the result). -NoChip makes it a no-op.
     if ($NoChip) { return }
@@ -844,7 +714,7 @@ function Write-CuStatus([string]$state, [string]$message, [int]$step) {
         $message = $message -replace '\|', '/' -replace "`r", ' ' -replace "`n", ' '
         $line = '{0}|{1}|{2}|{3}' -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(), $state, $step, $message
         [System.IO.File]::WriteAllText($script:StatusPath, $line, (New-Object System.Text.UTF8Encoding($false)))
-        Start-CuStatusChip
+        # The session owns both helpers; status writes never launch one.
     }
     catch { }
 }
@@ -870,6 +740,9 @@ function Get-CuActionLabel {
     return $Action
 }
 
+# Probes/stop/done must never create or revive UI. Other actions implicitly begin CU.
+if ($Action -in @('stop','fxoff','fxstatus') -or ($Action -eq 'status' -and $State -eq 'done')) { $NoChip = $true }
+if (-not $NoChip) { Start-CuSession }
 $script:CuLabel = Get-CuActionLabel
 $script:CuStep = Get-CuStep
 $script:CuError = $null
@@ -1079,74 +952,23 @@ switch ($Action) {
         Write-Output ("slept {0} ms" -f $DelayMs)
     }
 
-    'fxon' {
-        $fx = Join-Path $PSScriptRoot 'fx.ps1'
-        if (-not (Test-Path $fx)) { throw "missing overlay script: $fx" }
-        $pidFile = Join-Path $env:TEMP 'cu-fx.pid'
-        if (Test-Path $pidFile) {
-            $old = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue) -join ''
-            if ($old -match '^\d+$') { Stop-Process -Id ([int]$old) -Force -ErrorAction SilentlyContinue }
-        }
-        # Watchdog target: the harness window's process, so closing the harness takes the overlay
-        # down with it rather than stranding fog on the screen with nobody able to dismiss it.
-        $watch = $WatchPid
-        if ($watch -lt 0) {
-            $watch = 0
-            foreach ($l in [CuNat]::ListWindows($false)) {
-                $f = $l -split '\|'
-                if ($f[4] -match 'DeepSeek Harness') { $watch = [int]$f[1]; break }
-            }
-        }
-        # Started detached (see Start-Detached): a long-lived overlay that inherited the caller's
-        # stdout would keep that pipe open and make the caller look hung.
-        $fxCmd = '{0} -NoProfile -STA -ExecutionPolicy Bypass -File "{1}" -DurationSec {2}' -f $script:HostExe, $fx, $DurationSec
-        if ($DimPct -ge 0) { $fxCmd += (' -Dim {0}' -f ($DimPct / 100.0)) }
-        if ($DimAfter -ge 0) { $fxCmd += (' -DimAfterSec {0}' -f $DimAfter) }
-        if ($watch -gt 0) { $fxCmd += (' -WatchPid {0}' -f $watch) }
-        # Per-run headline. It has to travel as an argument, quoted by hand: the value routinely
-        # contains spaces, and an unquoted -Text is the exact class of bug that once made a
-        # caller's '-Text "cu-mcp boot"' fail parameter binding outright. Without this, a caller
-        # could pass a headline and see nothing change (the words come from a UTF-8 file by
-        # default, which stays the fallback here).
-        if (-not [string]::IsNullOrWhiteSpace($Text)) {
-            $fxCmd += (' -Text "{0}"' -f ($Text -replace '"', ''))
-        }
-        $p = New-Object psobject -Property @{ Id = (Start-Detached $fxCmd 'fx') }
-        Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii
-        Write-Output ("fx on: takeover overlay pid {0}, stays up until fxoff/watchdog (backstop {1}s), click-through, never steals focus" -f $p.Id, $DurationSec)
-        Write-Output ("         ambient: full strength for {0}s, then eases to {1} and stays there (screenshots do NOT interrupt it)" -f $(if ($DimAfter -ge 0) { $DimAfter } else { 6 }), $(if ($DimPct -ge 0) { "$DimPct% (explicit)" } else { '10% (fx.ps1 default)' }))
+    { $_ -in @('start','fxon') } {
+        # Start is idempotent: the original six-second intro clock keeps running.
+        Start-CuSession
+        $sessionReport = Get-CuSession
+        Write-Output ("CU on: session {0}, overlay pid {1}, progress pill pid {2}; edges dim after 6 seconds" -f $sessionReport.id, $sessionReport.fx.pid, $sessionReport.chip.pid)
     }
-
-    'fxoff' {
-        $pidFile = Join-Path $env:TEMP 'cu-fx.pid'
-        if (Test-Path $pidFile) {
-            $old = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue) -join ''
-            if ($old -match '^\d+$') { Stop-Process -Id ([int]$old) -Force -ErrorAction SilentlyContinue }
-            Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
-            # Clear the legacy mute flag: older builds of `shot` created one, and a leftover
-            # file must never influence a later overlay (fx.ps1 clears it at startup anyway).
-            Remove-Item -LiteralPath (Join-Path $env:TEMP 'cu-fx.mute') -Force -ErrorAction SilentlyContinue
-            Write-Output 'fx off - overlay gone, screen restored'
-        }
-        else { Write-Output 'fx off (nothing was running)' }
+    { $_ -in @('stop','fxoff') } {
+        Stop-CuSession
+        Write-Output 'CU off: overlay and progress pill closed'
     }
-
     'fxstatus' {
-        # Is the takeover overlay up right now? Added so a caller can decide whether turning it
-        # on would RESTART the intro animation: `fxon` always starts a fresh overlay, which is
-        # visible as the fog re-condensing, so a batch must not call it blindly on every step.
-        # The pid file is only a hint (it can be stale), so the process is checked for real.
-        $pidFile = Join-Path $env:TEMP 'cu-fx.pid'
-        $fxPid = 0
-        if (Test-Path $pidFile) {
-            $old = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue) -join ''
-            if ($old -match '^\d+$') { $fxPid = [int]$old }
-        }
-        $alive = $false
-        if ($fxPid -gt 0) { $alive = [bool](Get-Process -Id $fxPid -ErrorAction SilentlyContinue) }
-        if ($Json) { Write-Output ('{{"on":{0},"pid":{1}}}' -f $(if ($alive) { 'true' } else { 'false' }), $fxPid) }
-        elseif ($alive) { Write-Output ("fx on - overlay pid {0}" -f $fxPid) }
-        else { Write-Output 'fx off (nothing is running)' }
+        $sessionReport = Get-CuSession
+        $sessionAlive = [bool]($sessionReport -and $sessionReport.active -and (Test-CuProcess $sessionReport.owner))
+        $fxAlive = [bool]($sessionAlive -and (Test-CuProcess $sessionReport.fx))
+        $pillAlive = [bool]($sessionAlive -and (Test-CuProcess $sessionReport.chip))
+        $stateReport = @{ on=$fxAlive; pill=$pillAlive; active=$sessionAlive; pid=$sessionReport.fx.pid; chipPid=$sessionReport.chip.pid; sessionId=$sessionReport.id; ownerPid=$sessionReport.owner.pid }
+        if ($Json) { $stateReport | ConvertTo-Json -Compress } else { Write-Output ("CU active={0}, overlay={1}, pill={2}" -f $sessionAlive,$fxAlive,$pillAlive) }
     }
 
     'wtext' {
@@ -1332,6 +1154,9 @@ catch {
 finally {
     if ($script:CuError) {
         Write-CuStatus 'err' ($script:CuLabel + ' FAILED: ' + $script:CuError) $script:CuStep
+    }
+    elseif ($Action -eq 'status' -and $State -eq 'done') {
+        Stop-CuSession
     }
     elseif ($Action -eq 'status') {
         # let the caller choose the state; anything else would overwrite "done" with "ok"

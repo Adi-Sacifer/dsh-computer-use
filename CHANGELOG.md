@@ -6,6 +6,82 @@ machine dates; there are no git tags yet, so this file starts with the first rel
 中文提要：本文件记录 cu-windows（dsh-computer-use）的重要变更。目前还没有 git tag，所以从这一版
 开始记录；每条下面都有一行中文说明。
 
+## [2.0.0] - 2026-09-26
+
+这一版把"谁负责开关接管特效"从每个调用方的自觉，改成由**会话**持有的结构性保证；CU 也第一次成为
+宿主里常驻的 MCP 工具（不再每次调用重开进程）。
+
+### Added
+
+- **`scripts/cu-session.ps1` — one owner for the whole takeover.** A session file plus a
+  same-user mutex (`Local\DSH-CU-Session-v2`) holds the overlay pid and the pill pid, and every
+  helper re-checks ownership every 400 ms. A helper only counts as alive if **pid, process start
+  time and executable path all match** (pid alone would misfire after pid reuse), and the session
+  file is replaced atomically. A second task cannot take over a desktop a live session owns.
+  中文：新增会话层，把叠层与药丸的归属收进一个带互斥锁和"pid+启动时间+路径"三重校验的会话文件，
+  助手每 400 ms 自检归属；别的任务不能抢占正在使用的桌面。
+- **`start` / `stop` actions** (`fxon` / `fxoff` remain aliases). Every ordinary action starts a
+  session implicitly, and a repeated `start` is idempotent — it does not restart the six-second
+  intro. `status -State done` closes the session too.
+  中文：新增 `start`/`stop`（`fxon`/`fxoff` 为别名）；普通动作会自动开会话，重复 `start` 幂等，
+  不会重播 6 秒开场；`status done` 同样收尾。
+- **`mcp/cu-lifecycle.mjs` + `.cjs` — the host closes CU when its task ends.** A lifecycle hook
+  writes a generation-specific stop marker on task idle, cancellation and disposal, so the effect
+  cannot outlive the work that owns it; the MCP server also closes its own session on stdin EOF,
+  and a crashed server is covered by the owner-identity check above.
+  中文：新增宿主生命周期钩子：任务 idle / 取消 / dispose 时写 stop 标记收尾；MCP 断开自行清理，
+  MCP 崩溃由会话归属校验兜底。
+- **`tests/verify-cu.mjs` and `tests/verify-lifecycle.mjs`** — real regression suites. The first
+  drives a real MCP server on an isolated runtime dir and asserts 20+ behaviours (no UI on
+  discovery, protocol fallback, idempotent `start`, Chinese status text, screenshots that do not
+  restart the effect, measured dim phase ≥6 s → 10%, `expect` refusal, `stop`, `status done`,
+  stop-marker teardown, helper exit after disconnect) — plus the same with `--crash`. The second
+  unit-tests the hook: task completion, mid-tool cancellation, disposal, progress injection, and
+  other-task isolation.
+  中文：新增两个真回归套件（真起 MCP、隔离运行时、20+ 行为断言，含崩溃路径；钩子覆盖任务完成、
+  工具中途取消、dispose、进度注入与跨任务隔离）。
+
+### Changed
+
+- **`mcp__cu__cu` is the ordinary route now, and it is persistent.** The MCP tool keeps one warm
+  PowerShell process and returns screenshots as image blocks even without `path`; application
+  MCP tools take priority for their own product. `mcp/cu-batch.mjs` is demoted to a hidden-process
+  fallback for one complete batch and rejects `--keep-fx` (a session cannot be kept alive by a
+  process that exits with the batch).
+  中文：常驻 MCP 工具成为常规路径（截图可直接作为图像块返回、无需路径）；产品自带的 MCP 优先；
+  批量驱动降级为单批后备，并拒绝 `--keep-fx`。
+- **Helper processes are created hidden and inherit no handles** (`CreateProcess` with
+  `bInheritHandles=false`), replacing the old `Start-Process` + handle-flag juggling: no terminal
+  flash, and a detached helper can no longer hold a caller's stdio pipe open.
+  中文：助手进程改为隐藏创建且不继承任何句柄，不再有黑窗闪烁，也不会再抓住调用方管道不放。
+- **`docs/SKILL.md` is now a 47-line routing guide**, and the previous long-form diagnostics moved
+  verbatim to `docs/references/legacy-diagnostics.md` (561 lines). The knowledge is relocated, not
+  dropped — but anyone following a link into the old single file needs to know where it went.
+  中文：技能文档精简为 47 行路由指南，原 561 行长文档**原样搬**到 `docs/references/`。
+- **The MCP server no longer writes argument payloads to its log** (typed text and clipboard
+  contents stayed out of the log), and a malformed request still gets a `-32700` reply.
+  中文：服务器不再把参数内容写进日志；坏请求仍会明确回错。
+
+### Fixed
+
+- **The pill no longer outlives its run, and the effect no longer restarts on every batch** —
+  both were symptoms of the same missing owner that 1.1.1 worked around with per-batch
+  `fxon`/`fxoff`. The session layer removes the workaround.
+  中文：药丸不再残留、特效不再每批重播——1.1.1 用的"每批自己开关"权宜做法由会话层取代。
+
+### Verification
+
+Measured on the machine that reported the bugs (3840x2160, PowerShell 7.6.6):
+
+| check | result |
+|---|---|
+| `node tests/verify-cu.mjs` | `passed: true`, ~15 s, dim phase `elapsed 6.017 s → targetOpacity 0.1` |
+| `node tests/verify-cu.mjs --crash` | `passed: true`, ~15 s (helpers exit after the server is killed) |
+| `node tests/verify-lifecycle.mjs` | PASS — completion, mid-tool cancellation, disposal, progress, isolation |
+| parse errors, pwsh 7.6.6 and Windows PowerShell 5.1 | 0 on every shipped `.ps1`; ASCII-only constraint holds |
+
+中文验证：两个套件加上崩溃变体全部通过；叠层相位实测 6.017 秒降到 10%；所有脚本双宿主 0 解析错误。
+
 ## [1.1.1] - 2026-09-26
 
 一天里第三次收到"特效又没了 / 按键点不动"之后做的排查。结论写在最前面：**叠层和输入注入本身

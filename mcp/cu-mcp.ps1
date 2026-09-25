@@ -59,9 +59,11 @@ function Send-Error($id, [int]$code, [string]$message) {
 }
 
 # --------------------------------------------------------------------------- tool definitions
-$actions = @('info','shot','cursor','move','click','drag','scroll','type','paste','key','windows','focus','clip','wtext','uia','wake','status','sleep','fxon','fxoff','fxstatus')
+$actions = @('info','shot','cursor','move','click','drag','scroll','type','paste','key','windows','focus','clip','wtext','uia','wake','status','sleep','start','stop','fxon','fxoff','fxstatus')
 $props = [ordered]@{
-    action  = @{ type = 'string'; enum = $actions; description = 'cu.ps1 action to run.' }
+    dimPct = @{ type = 'integer'; minimum = 0; maximum = 100; description = 'Ambient edge opacity percent, default 10.' }
+    dimAfter = @{ type = 'integer'; minimum = 0; description = 'Seconds before edges dim, default 6.' }
+    action  = @{ type = 'string'; enum = $actions; description = 'start/stop own the CU task session. Work actions auto-start; fxstatus is a read-only probe. Use stop in task cleanup.' }
     x       = @{ type = 'integer'; description = 'Pointer/target X (physical pixel).' }
     y       = @{ type = 'integer'; description = 'Pointer/target Y (physical pixel).' }
     x1      = @{ type = 'integer'; description = 'drag start X.' }
@@ -98,44 +100,11 @@ $tool = @{
     inputSchema = @{ type = 'object'; properties = $props; required = @('action'); additionalProperties = $false }
 }
 
-# ------------------------------------------------------------------- warm up: load cu.ps1 once
-# Two steps, in this order, for a reason:
-#  1. cu.ps1 starts its long-lived status chip from whichever process runs a cu action. If THIS
-#     process spawned it, the chip would inherit this server's stdout - the MCP protocol pipe -
-#     and hold it open. So the chip is started first, from a throwaway child whose stdio are
-#     FILES; afterwards cu.ps1's own guard (Test-ChipRunning) sees it and spawns nothing.
-#  2. Only then load cu.ps1 in this process (Add-Type is cached from here on: ~3 ms per action).
-$bootSw = [System.Diagnostics.Stopwatch]::StartNew()
-try {
-    $self = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Path
-    if ($self) {
-        # A stale status file makes the pill keep showing the PREVIOUS run's last line for as long
-        # as nobody posts a new one - measured while fixing this: after a test that ended on a
-        # `wtext` action, the pill sat there reading "wtext" and looked like a dead indicator.
-        # THE ORDER MATTERS, and it was measured: kill the old chip FIRST (its pid file makes
-        # Test-ChipRunning's fast path return instantly), then clear the file, then post one
-        # fresh line - cu.ps1's own guard sees no chip and starts a clean one, which renders the
-        # honest current state. Clearing the file first used to leave the OLD chip sitting on its
-        # last-known text, because an empty status file makes the reader return early.
-        $chipPidFile = Join-Path $env:TEMP 'cu-status.pid'
-        if (Test-Path -LiteralPath $chipPidFile) {
-            $oldChip = (Get-Content -LiteralPath $chipPidFile -ErrorAction SilentlyContinue) -join ''
-            if ($oldChip -match '^\d+$') { Stop-Process -Id ([int]$oldChip) -Force -ErrorAction SilentlyContinue }
-            Remove-Item -LiteralPath $chipPidFile -Force -ErrorAction SilentlyContinue
-        }
-        Remove-Item -LiteralPath (Join-Path $env:TEMP 'cu-status.txt') -Force -ErrorAction SilentlyContinue
-        Start-Process -FilePath $self `
-            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $CuPath, '-Action', 'status', '-Text', '"cu ready"' `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $PSScriptRoot 'chip.out') `
-            -RedirectStandardError (Join-Path $PSScriptRoot 'chip.err') | Out-Null
-        Start-Sleep -Milliseconds 900
-    }
-    $null = & { . $CuPath -Action cursor -NoChip } *>&1 | Out-String
-    Write-Log ('warm-up ok in {0:N0} ms (chip pre-started with file stdio; cu.ps1 loaded, Add-Type cached)' -f $bootSw.Elapsed.TotalMilliseconds)
-} catch {
-    Write-Log ('warm-up FAILED: ' + $_.Exception.Message)
-}
+# Warm only the API/types. MCP discovery/probes never start or kill visible UI.
+$bootSw = [Diagnostics.Stopwatch]::StartNew()
+$null = & $CuPath -Action cursor -NoChip *>&1 | Out-String
+. (Join-Path (Split-Path -Parent $CuPath) 'cu-session.ps1')
+Write-Log ('warm-up ok in {0:N0} ms (no UI; process reused for all calls)' -f $bootSw.Elapsed.TotalMilliseconds)
 
 # ------------------------------------------------------------------------------ arg plumbing
 # map JSON argument name -> cu.ps1 parameter name (same spelling, different case only)
@@ -144,7 +113,7 @@ $paramNames = @{
     hwnd='Hwnd'; title='Title'; path='Path'; text='Text'; keys='Keys'; button='Button';
     double='Double'; count='Count'; amount='Amount'; mode='Mode'; name='Name'; index='Index';
     exact='Exact'; depth='Depth'; all='All'; noWake='NoWake'; json='Json'; grid='Grid';
-    delayMs='DelayMs'; state='State'; noChip='NoChip'
+    dimPct='DimPct'; dimAfter='DimAfter'; delayMs='DelayMs'; state='State'; noChip='NoChip'; expect='Expect'
 }
 $switchNames = @('double','exact','all','noWake','json','noChip')
 
@@ -205,8 +174,10 @@ function Invoke-CuAction($argObj) {
             $p[$pn] = $v
         }
     }
+    $p['SessionOwnerPid'] = $PID
+    if ($p['Action'] -eq 'shot' -and -not $p['Path']) { $p['Path'] = Join-Path $env:TEMP ('cu-shot-' + [guid]::NewGuid().ToString('N') + '.png') }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $text = & { . $CuPath @p } *>&1 | Out-String
+    $text = & $CuPath @p *>&1 | Out-String
     $sw.Stop()
     return @{ text = $text.TrimEnd(); ms = [int]$sw.Elapsed.TotalMilliseconds; params = $p }
 }
@@ -228,6 +199,7 @@ function Send-Reply([string]$json) {
 }
 
 Write-Log ("cu-mcp listening (pid $PID)")
+try {
 while ($true) {
     $line = $null
     try { $line = $script:In.ReadLine() } catch { break }
@@ -235,48 +207,31 @@ while ($true) {
     $payload = $line.Trim()
     if ($payload -eq '') { continue }
 
-    if ($payload -match '^(?i)content-length:\s*(\d+)\s*$') {
-        $script:Framing = 'content-length'
-        $len = [int]$Matches[1]
-        while ($true) {                                     # consume the remaining headers
-            $h = $script:In.ReadLine()
-            if ($null -eq $h) { break }
-            if ($h.Trim() -eq '') { break }
-        }
-        $buf = New-Object char[] $len
-        $got = 0
-        while ($got -lt $len) {
-            $n = $script:In.Read($buf, $got, $len - $got)
-            if ($n -le 0) { break }
-            $got += $n
-        }
-        $payload = -join $buf[0..([Math]::Max(0, $got - 1))]
-    }
-
-    Write-Log ('recv[' + $script:Framing + '] ' + $payload.Substring(0, [Math]::Min(150, $payload.Length)))
+    # Do not log typed text, clipboard contents or other argument payloads.
 
     # A malformed line must still get an ANSWER. Logging it and continuing - which is what this
     # did - leaves the client waiting for a response that never arrives: the caller sees a hang,
     # not an error, and the real cause (an undecodable argument) is invisible from the outside.
     $msg = $null
     try { $msg = $payload | ConvertFrom-Json } catch {
-        Write-Log ('bad json: ' + $payload.Substring(0, [Math]::Min(120, $payload.Length)))
+        Write-Log 'bad json (request payload omitted)'
         $idPart = 0
         if ($payload -match '"id"\s*:\s*(\d+)') { $idPart = [int]$Matches[1] }
         Send-Error $idPart -32700 'parse error: the request line was not valid JSON (check the server console encoding for non-ASCII arguments)'
         continue
     }
     if ($null -eq $msg.method) { continue }
+    Write-Log ('request method=' + [string]$msg.method + ' id=' + [string]$msg.id)
 
     switch ([string]$msg.method) {
         'initialize' {
             $v = '2025-06-18'
-            if ($msg.params -and $msg.params.protocolVersion) { $v = [string]$msg.params.protocolVersion }
+            # Do not claim future revisions whose wire protocol this server does not implement.
             Send-Result $msg.id @{
                 protocolVersion = $v
                 capabilities    = @{ tools = @{ listChanged = $false } }
-                serverInfo      = @{ name = 'cu'; version = '1.0.0' }
-                instructions    = 'Windows desktop control for this 3840x2160 machine. Use action=shot to look, then click/type; coordinates are physical pixels. The toolkit reports which window owned the clicked point.'
+                serverInfo      = @{ name = 'cu'; version = '2.0.0' }
+                instructions    = 'Prefer the target application MCP tools when available. For desktop fallback, use this persistent cu tool directly, never launch PowerShell per screenshot or use cu-batch when this tool is available. action=start begins a task; GUI actions auto-start the session too. One overlay and bottom progress pill follow the session; edges dim after six seconds. Post status text for task phases. Always call action=stop when CU finishes, fails or is cancelled. status state=done also stops both. Repeated start is idempotent. shot returns an image even without path; coordinates are physical screen pixels, not downscaled preview pixels.'
             }
         }
         'notifications/initialized' { }
@@ -313,4 +268,7 @@ while ($true) {
         }
     }
 }
-Write-Log 'stdin closed - exiting'
+} finally {
+    Stop-CuSession -OwnOnly
+    Write-Log 'stdin closed - session cleaned up'
+}

@@ -42,11 +42,19 @@ param(
     [int]$MarginY = 14,
     [double]$IdleFadeSec = 4.0,
     [int]$IdleExitSec = 180,
+    [string]$SessionFile = '',
+    [string]$SessionId = '',
     [int]$WatchPid = 0,
     [switch]$NoCaptureExclude
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'cu-session.ps1')
+trap {
+    [IO.File]::AppendAllText((Join-Path $script:CuRuntimeDir 'cu-status.ps1.error.log'), ($_ | Out-String))
+    exit 1
+}
+$script:sessionCheckAt = [DateTime]::MinValue
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 # ASCII-only on purpose: Windows PowerShell 5.1 reads BOM-less UTF-8 as the ANSI codepage, which
@@ -306,6 +314,10 @@ function Read-Status {
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(80)
 $timer.Add_Tick({
+        if ($SessionFile -and ([DateTime]::UtcNow - $script:sessionCheckAt).TotalMilliseconds -ge 400) {
+            $script:sessionCheckAt = [DateTime]::UtcNow
+            if (-not (Test-CuSessionOwner $SessionFile $SessionId)) { $script:closing = $true; $win.Close(); return }
+        }
         $script:tick++
 
         if (($script:tick -eq 3 -or $script:tick -eq 20) -and -not $NoCaptureExclude) {
@@ -350,7 +362,7 @@ $timer.Add_Tick({
 
         # Gone once the run is clearly over, and never left behind forever.
         $hideAfter = if ($script:state -eq 'done') { 8 } else { $IdleExitSec }
-        if ($idle -gt $hideAfter) {
+        if (-not $SessionFile -and $idle -gt $hideAfter) {
             $script:closing = $true
             $win.Close()
             return
@@ -373,3 +385,4 @@ Set-DotColor $colAccent
 Start-Pulse
 
 [void]$win.ShowDialog()
+$timer.Stop()

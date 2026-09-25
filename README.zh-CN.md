@@ -1,5 +1,9 @@
 # cu-windows —— 给 AI agent 一双真的眼睛和一双手
 
+当前调用规范：优先使用产品自带的 MCP，桌面兜底则直接调用常驻 `mcp__cu__cu`。CU 会话同时持有
+边缘特效和进度药丸，`stop`、任务结束或取消时一起关闭。详见 [当前调用规范](docs/SKILL.md) 与
+[变更记录](CHANGELOG.md)。
+
 一个**单文件 PowerShell 工具包**，让 AI agent 真正操作 Windows 桌面：截屏、找到控件、点击、输入，
 并且**验证到底点没点中**。不需要 Python、不需要 Node、不需要装任何东西——Windows 自带的
 PowerShell 5.1 就够。

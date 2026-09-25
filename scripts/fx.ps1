@@ -27,10 +27,18 @@ param(
     [string]$MuteFile = "",
     [double]$Dim = 0.10,
     [double]$DimAfterSec = 6,
+    [string]$SessionFile = '',
+    [string]$SessionId = '',
     [int]$WatchPid = 0
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'cu-session.ps1')
+trap {
+    [IO.File]::AppendAllText((Join-Path $script:CuRuntimeDir 'fx.ps1.error.log'), ($_ | Out-String))
+    exit 1
+}
+$script:sessionCheckAt = [DateTime]::MinValue
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 # This script is deliberately ASCII-only: Windows PowerShell 5.1 reads BOM-less
@@ -362,6 +370,10 @@ $script:watchTick = 0
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(40)
 $timer.Add_Tick({
+        if ($SessionFile -and ([DateTime]::UtcNow - $script:sessionCheckAt).TotalMilliseconds -ge 400) {
+            $script:sessionCheckAt = [DateTime]::UtcNow
+            if (-not (Test-CuSessionOwner $SessionFile $SessionId)) { $script:closing = $true; $win.Close(); return }
+        }
         $el = ([DateTime]::Now - $script:t0).TotalSeconds
         foreach ($b in $script:blobs) {
             $birth = [Math]::Max(0.0, [Math]::Min(1.0, ($el - $b.Delay) / 1.2))
@@ -401,6 +413,7 @@ $timer.Add_Tick({
             if ($el -lt $DimAfterSec) { $target = 1.0 }
             if ([Math]::Abs($target - $script:opacityTarget) -gt 0.001) {
                 $script:opacityTarget = $target
+                [IO.File]::WriteAllText((Join-Path $script:CuRuntimeDir 'fx-phase.json'), (@{sessionId=$SessionId; elapsed=$el; targetOpacity=$target; dimAfterSec=$DimAfterSec} | ConvertTo-Json -Compress))
                 $ta = New-Object Windows.Media.Animation.DoubleAnimation($target, [Windows.Duration]::new([TimeSpan]::FromMilliseconds(700)))
                 $ta.EasingFunction = New-Object Windows.Media.Animation.CubicEase
                 $ta.EasingFunction.EasingMode = [Windows.Media.Animation.EasingMode]::EaseOut
@@ -418,3 +431,4 @@ $timer.Add_Tick({
 $timer.Start()
 
 [void]$win.ShowDialog()
+$timer.Stop()
