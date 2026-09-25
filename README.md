@@ -169,6 +169,22 @@ Two face-selection traps worth knowing, both measured:
 Rather than passing flags every time, just edit the defaults at the top of `scripts/fx.ps1`
 (`$Font`, `$Accent`, and so on) — or point `-TextFile` / `-SubTextFile` somewhere else entirely.
 
+### If the overlay ever gets stuck
+
+Double-click **`scripts/fxkill.cmd`**. It kills the overlay and the activity chip, and clears
+their state files. It needs no agent, no host application and no terminal — it just works.
+
+```
+Killing overlay/chip process 12345
+Done. Overlay/chip processes killed: 1
+```
+
+This exists because a full-screen always-on-top window with nobody left to dismiss it is the
+worst possible failure mode for a tool like this. Both helpers also watch the host application's
+process and take themselves down when it exits (`-WatchTitle`), and both are click-through, so
+neither can ever block a click even while it is up. The kill switch is the third layer, for the
+case where all of that fails.
+
 ## Diagnostics
 
 `diagnostics/` holds the minimal repro scripts used to establish the findings above — an

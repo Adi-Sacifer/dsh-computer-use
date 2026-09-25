@@ -143,6 +143,21 @@ cu.ps1 fxon -DimAfter 6                         # 多少秒后开始淡到环境
 不想每次都传参数的话，直接改 `scripts/fx.ps1` 顶部的默认值（`$Font`、`$Accent` 等），
 或者用 `-TextFile` / `-SubTextFile` 把文案指到别的地方。
 
+### 特效卡住了怎么办
+
+双击 **`scripts/fxkill.cmd`**。它会把特效和活动指示灯一起杀掉，并清掉它们的状态文件。
+不需要 agent、不需要宿主程序、不需要开终端——双击就完事。
+
+```
+Killing overlay/chip process 12345
+Done. Overlay/chip processes killed: 1
+```
+
+为什么要有这个东西：一个**全屏置顶、又没人能关掉**的窗口，是这类工具最糟糕的失败形态。
+除此之外还有两道保险——两个辅助进程都会盯着宿主程序的进程，宿主一退出就自己跟着退出
+（`-WatchTitle` 参数），而且它们都是点击穿透的，就算还挂着也挡不住任何点击。
+这个 kill 开关是第三道，专门兜住"前面都没兜住"的情况。
+
 ## 已知限制
 
 - **Flutter** 应用只暴露一个 `FLUTTERVIEW` 面板；某些 Flutter 控件（尤其是自绘胶囊开关）**完全无视**
