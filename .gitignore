@@ -1,0 +1,14 @@
+# generated / scratch
+*.log
+*.tmp
+*.out
+*.err
+_scratch/
+
+# screenshots produced while testing the toolkit
+*.png
+!docs/img/*.png
+
+# Windows
+Thumbs.db
+desktop.ini
